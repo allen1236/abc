@@ -9,8 +9,9 @@
 ***********************************************************************/
 
 #include "minr.h"
-#include <sys/stat.h> // For mkdir
-#include <unistd.h>   // For access()
+#include <sys/stat.h>
+#include <unistd.h>
+#include <time.h>
 
 ABC_NAMESPACE_IMPL_START
 
@@ -208,12 +209,188 @@ void Minr_SimulateTimeframe(Gia_Man_t * pGia, Vec_Int_t * vObjVals) {
 ///                  PROPAGATION & CUT SELECTION                     ///
 ////////////////////////////////////////////////////////////////////////
 
+/**
+ * Minr_ExtractCut - Extract constraint cut via reverse DFS from COs.
+ *
+ * For each CO (PO/RI):
+ *   - If its value is known (0/1): add the CO itself to the cut.
+ *   - If its value is X: DFS backwards through fanins; when a known-valued
+ *     node is reached, add it to the cut and stop (don't go deeper).
+ *
+ * This produces a tighter cut than the forward-pass approach: only nodes
+ * whose values are actually observable from some CO are constrained.
+ *
+ * Requires: p->vPropVals already populated (by propagation).
+ * Modifies: p->vCutNodes (cleared and repopulated).
+ */
+void Minr_ExtractCut(Minr_Man_t * p) {
+    Gia_Man_t * pGia = p->pGia;
+    int nObjs = Gia_ManObjNum(pGia);
+    Gia_Obj_t * pObj;
+    int iObj;
+
+    if (!p->vCutNodes)
+        p->vCutNodes = Vec_IntAlloc(100);
+    else
+        Vec_IntClear(p->vCutNodes);
+
+    Vec_Int_t * vCutFlags = Vec_IntStart(nObjs);
+    Vec_Int_t * vVisited  = Vec_IntStart(nObjs);
+    Vec_Int_t * vStack    = Vec_IntAlloc(256);
+
+    Gia_ManForEachCo(pGia, pObj, iObj) {
+        int coId = Gia_ObjId(pGia, pObj);
+        int coVal = Vec_IntEntry(p->vPropVals, coId);
+
+        if (coVal != MINR_VAL_X) {
+            Vec_IntWriteEntry(vCutFlags, coId, 1);
+            continue;
+        }
+
+        // X-valued CO: reverse DFS from its driver to find known frontier
+        Vec_IntClear(vStack);
+        Vec_IntPush(vStack, Gia_ObjFaninId0(pObj, coId));
+
+        while (Vec_IntSize(vStack) > 0) {
+            int nodeId = Vec_IntPop(vStack);
+            if (nodeId == 0) continue;
+            if (Vec_IntEntry(vVisited, nodeId)) continue;
+            Vec_IntWriteEntry(vVisited, nodeId, 1);
+
+            int val = Vec_IntEntry(p->vPropVals, nodeId);
+            if (val != MINR_VAL_X) {
+                Vec_IntWriteEntry(vCutFlags, nodeId, 1);
+                continue;
+            }
+
+            Gia_Obj_t * pNode = Gia_ManObj(pGia, nodeId);
+            if (Gia_ObjIsAnd(pNode)) {
+                Vec_IntPush(vStack, Gia_ObjFaninId0(pNode, nodeId));
+                Vec_IntPush(vStack, Gia_ObjFaninId1(pNode, nodeId));
+            }
+        }
+    }
+
+    Gia_ManForEachObj(pGia, pObj, iObj) {
+        if (Vec_IntEntry(vCutFlags, iObj))
+            Vec_IntPush(p->vCutNodes, iObj);
+    }
+
+    Vec_IntFree(vCutFlags);
+    Vec_IntFree(vVisited);
+    Vec_IntFree(vStack);
+}
+
+/**
+ * Minr_ExtractEqCut - Extract eq cut for mode 3 refinement.
+ *
+ * Eq cut = nodes closest to outputs that depend only on constraint cut,
+ * specified registers, and PIs (i.e. not on free register cone).
+ *
+ * Algorithm:
+ * 1. From each free RO, forward traverse toward outputs. Mark all visited
+ *    nodes. STOP when we hit the constraint cut (do not mark, do not cross).
+ * 2. From each CO, reverse DFS. When we hit an unmarked node, add it to
+ *    eq cut and stop (don't go deeper).
+ *
+ * Requires: p->vCutNodes (constraint cut), p->vPropVals, p->pInitStr.
+ * Modifies: p->vEqCutNodes (cleared and repopulated).
+ */
+void Minr_ExtractEqCut(Minr_Man_t * p) {
+    Gia_Man_t * pGia = p->pGia;
+    int nObjs = Gia_ManObjNum(pGia);
+    Gia_Obj_t * pObj;
+    int iObj;
+
+    if (!p->vEqCutNodes)
+        p->vEqCutNodes = Vec_IntAlloc(100);
+    else
+        Vec_IntClear(p->vEqCutNodes);
+
+    Vec_Int_t * vCutSet = Vec_IntStart(nObjs);
+    int NodeId, ci;
+    Vec_IntForEachEntry(p->vCutNodes, NodeId, ci)
+        Vec_IntWriteEntry(vCutSet, NodeId, 1);
+
+    Vec_Int_t * vMarked = Vec_IntStart(nObjs);
+
+    Gia_ManStaticFanoutStart(pGia);
+
+    Vec_Int_t * vQueue = Vec_IntAlloc(256);
+    int k = 0;
+    Gia_ManForEachRo(pGia, pObj, iObj) {
+        char c = p->pInitStr[k++];
+        if (c == '0' || c == '1') continue;
+        int roId = Gia_ObjId(pGia, pObj);
+        Vec_IntPush(vQueue, roId);
+        Vec_IntWriteEntry(vMarked, roId, 1);
+    }
+
+    while (Vec_IntSize(vQueue) > 0) {
+        int nodeId = Vec_IntPop(vQueue);
+        if (Vec_IntEntry(vCutSet, nodeId)) continue;
+        Gia_Obj_t * pNode = Gia_ManObj(pGia, nodeId);
+        int i;
+        Gia_Obj_t * pFanout;
+        Gia_ObjForEachFanoutStatic(pGia, pNode, pFanout, i) {
+            int foId = Gia_ObjId(pGia, pFanout);
+            if (Vec_IntEntry(vCutSet, foId)) continue;
+            if (Vec_IntEntry(vMarked, foId)) continue;
+            Vec_IntWriteEntry(vMarked, foId, 1);
+            Vec_IntPush(vQueue, foId);
+        }
+    }
+
+    Gia_ManStaticFanoutStop(pGia);
+    Vec_IntFree(vQueue);
+
+    Vec_Int_t * vEqCutFlags = Vec_IntStart(nObjs);
+    Vec_Int_t * vVisited = Vec_IntStart(nObjs);
+    Vec_Int_t * vStack = Vec_IntAlloc(256);
+
+    Gia_ManForEachCo(pGia, pObj, iObj) {
+        int coId = Gia_ObjId(pGia, pObj);
+        Vec_IntClear(vStack);
+        Vec_IntPush(vStack, Gia_ObjFaninId0(pObj, coId));
+
+        while (Vec_IntSize(vStack) > 0) {
+            int nodeId = Vec_IntPop(vStack);
+            if (nodeId == 0) continue;
+            if (Vec_IntEntry(vVisited, nodeId)) continue;
+            Vec_IntWriteEntry(vVisited, nodeId, 1);
+
+            if (!Vec_IntEntry(vMarked, nodeId)) {
+                Vec_IntWriteEntry(vEqCutFlags, nodeId, 1);
+                continue;
+            }
+
+            Gia_Obj_t * pNode = Gia_ManObj(pGia, nodeId);
+            if (Gia_ObjIsAnd(pNode)) {
+                Vec_IntPush(vStack, Gia_ObjFaninId0(pNode, nodeId));
+                Vec_IntPush(vStack, Gia_ObjFaninId1(pNode, nodeId));
+            }
+        }
+    }
+
+    Gia_ManForEachObj(pGia, pObj, iObj) {
+        if (Vec_IntEntry(vEqCutFlags, iObj))
+            Vec_IntPush(p->vEqCutNodes, iObj);
+    }
+
+    Vec_IntFree(vCutSet);
+    Vec_IntFree(vMarked);
+    Vec_IntFree(vEqCutFlags);
+    Vec_IntFree(vVisited);
+    Vec_IntFree(vStack);
+}
+
 void Minr_PropagateAndCut(Minr_Man_t * p) {
     Gia_Man_t * pGia = p->pGia;
     int iObj;
     Gia_Obj_t * pObj;
 
-    // 1. Initialize Values vector
+    // 1. Initialize Values vector (free old if re-entering, e.g. -O 2 outer loop)
+    if (p->vPropVals) Vec_IntFree(p->vPropVals);
     p->vPropVals = Vec_IntStart(Gia_ManObjNum(pGia));
     
     // 2. Setup Inputs for Propagation (Scenario 2: RO=-I, PI=X)
@@ -235,44 +412,31 @@ void Minr_PropagateAndCut(Minr_Man_t * p) {
     // 3. Run Core Simulation
     Minr_SimulateTimeframe(pGia, p->vPropVals);
 
-    // 4. Cut Selection (Forward Pass)
-    // Rule: Obj is Cut if (Val != X) AND (IsCO OR Exists Fanout with Val == X)
-    p->vCutNodes = Vec_IntAlloc(100);
-    
-    // Need Fanouts. Enable static fanout.
-    Gia_ManStaticFanoutStart(pGia);
+    // 4. Cut Selection (Reverse DFS from COs)
+    Minr_ExtractCut(p);
 
-    Gia_ManForEachObj(pGia, pObj, iObj) {
-        int Val = Vec_IntEntry(p->vPropVals, iObj);
-        
-        // Only consider Known nodes for the cut
-        if (Val == MINR_VAL_X) continue;
-        
-        int fIsCut = 0;
-        
-        // Case A: It's a CO (Combinational Output: PO or RI/Latch Input)
-        if (Gia_ObjIsCo(pObj)) {
-            fIsCut = 1;
-        }
-        // Case B: Fanout check
-        else {
-            int iFanout;
-            int k;
-            Gia_ObjForEachFanoutStaticId(pGia, iObj, iFanout, k) {
-                int ValFan = Vec_IntEntry(p->vPropVals, iFanout);
-                if (ValFan == MINR_VAL_X) {
-                    fIsCut = 1;
-                    break;
-                }
+    // Compute specRoCutRatio: % of specified (0/1) ROs in the cut
+    {
+        Vec_Int_t * vCutSet = Vec_IntStart(Gia_ManObjNum(pGia));
+        int NodeId, ci;
+        Vec_IntForEachEntry(p->vCutNodes, NodeId, ci)
+            Vec_IntWriteEntry(vCutSet, NodeId, 1);
+        int nSpec = 0, nSpecInCut = 0;
+        k = 0;
+        Gia_ManForEachRo(pGia, pObj, iObj) {
+            char c = p->pInitStr[k++];
+            if (c == '0' || c == '1') {
+                nSpec++;
+                if (Vec_IntEntry(vCutSet, Gia_ObjId(pGia, pObj)))
+                    nSpecInCut++;
             }
         }
-        
-        if (fIsCut) {
-            Vec_IntPush(p->vCutNodes, iObj);
-        }
+        p->specRoCutRatio = (nSpec > 0) ? 100.0 * nSpecInCut / nSpec : 0.0;
+        Vec_IntFree(vCutSet);
+        if (p->vLevel > 0)
+            printf("[Prop] Specified ROs in cut: %d/%d (%.2f%%)\n",
+                   nSpecInCut, nSpec, p->specRoCutRatio);
     }
-    
-    Gia_ManStaticFanoutStop(pGia);
 
     if (p->vLevel > 0) {
         printf("[Prop] Cut size: %d nodes.\n", Vec_IntSize(p->vCutNodes));
@@ -362,7 +526,7 @@ void Minr_AddEquiv(Minr_Man_t * p, int iObjTo, int iObjFrom, int FrameTo, int Fr
 ///                    SOLVER IO & DECODING                          ///
 ////////////////////////////////////////////////////////////////////////
 
-Vec_Int_t * Minr_CallSolver(Minr_Man_t * p, char * pFileName, char * pSolverPath) {
+Vec_Int_t * Minr_CallSolver(Minr_Man_t * p, char * pFileName, char * pSolverPath, double timeoutSec) {
     char Command[2000];
     char LogFile[1000];
     sprintf(LogFile, "%s.log", pFileName);
@@ -370,15 +534,25 @@ Vec_Int_t * Minr_CallSolver(Minr_Man_t * p, char * pFileName, char * pSolverPath
     char * pPath = pSolverPath ? pSolverPath : (char *)"_/EvalMaxSAT";
     if (access(pPath, F_OK) == -1) {
         printf("[Minr] Solver binary not found: %s\n", pPath);
+        p->solverStatus = 3;
         return NULL;
     }
 
-    sprintf(Command, "%s %s > %s", pPath, pFileName, LogFile);
+    if (timeoutSec > 0)
+        sprintf(Command, "timeout %.1f %s %s > %s", timeoutSec, pPath, pFileName, LogFile);
+    else
+        sprintf(Command, "%s %s > %s", pPath, pFileName, LogFile);
     if (p->vLevel > 0) printf("Running solver: %s\n", Command);
     
     abctime clk = Abc_Clock();
     int ret = system(Command);
-    if (p->vLevel > 0) Abc_PrintTime(1, "Solver runtime", Abc_Clock() - clk);
+    p->timeSolver = Abc_Clock() - clk;
+    if (p->vLevel > 0) Abc_PrintTime(1, "Solver runtime", p->timeSolver);
+    if (ret == 31744) {
+        printf("[Minr] Solver timed out (%.1f sec limit).\n", timeoutSec);
+        p->solverStatus = 4;
+        return NULL;
+    }
     if (ret != 7680) printf("[Minr] Solver check: exit code %d\n", ret);
 
     FILE * pFile = fopen(LogFile, "r");
@@ -388,42 +562,54 @@ Vec_Int_t * Minr_CallSolver(Minr_Man_t * p, char * pFileName, char * pSolverPath
     }
 
     Vec_Int_t * vModel = NULL;
-    char LineBuf[1024];  // Buffer for reading line-by-line (status lines are short)
-    int fSat = 0;
+    char LineBuf[1024];
+    int fStatusFound = 0;
 
-    // First pass: find status line and determine format
+    // First pass: find "s " status line and determine assignment format
     int fStandardDimacs = -1;  // -1 = unknown, 0 = bitstring, 1 = standard DIMACS
     while (fgets(LineBuf, sizeof(LineBuf), pFile)) {
-        if (strncmp(LineBuf, "s ", 2) == 0) {
-            if (strstr(LineBuf, "OPTIMUM FOUND") || strstr(LineBuf, "SATISFIABLE")) fSat = 1;
-            else if (strstr(LineBuf, "UNSATISFIABLE")) {
+        if (strncmp(LineBuf, "s ", 2) == 0 && !fStatusFound) {
+            fStatusFound = 1;
+            if (strstr(LineBuf, "OPTIMUM FOUND")) {
+                p->solverStatus = 1;
+            } else if (strstr(LineBuf, "UNSATISFIABLE")) {
+                p->solverStatus = 2;
                 printf("[Minr] Problem is UNSATISFIABLE.\n");
+                fclose(pFile);
+                return NULL;
+            } else {
+                p->solverStatus = 3;
+                LineBuf[strcspn(LineBuf, "\r\n")] = '\0';
+                printf("[Minr] Unexpected solver status: \"%s\"\n", LineBuf);
                 fclose(pFile);
                 return NULL;
             }
         }
         else if (strncmp(LineBuf, "v ", 2) == 0 && fStandardDimacs == -1) {
-            // Detect format from first "v " line
             char * pStr = LineBuf + 2;
             for (int k = 0; pStr[k] && pStr[k] != '\n' && pStr[k] != '\r'; k++) {
                 if (pStr[k] == ' ') { fStandardDimacs = 1; break; }
             }
-            if (fStandardDimacs == -1) fStandardDimacs = 0;  // bitstring format
+            if (fStandardDimacs == -1) fStandardDimacs = 0;
         }
     }
 
-    // Second pass: parse model (reopen file or rewind)
+    if (!fStatusFound) {
+        p->solverStatus = 3;
+        printf("[Minr] No status line (\"s ...\") found in solver output.\n");
+        fclose(pFile);
+        return NULL;
+    }
+
+    // Second pass: decode assignment
     rewind(pFile);
-    if (vModel == NULL && fSat) vModel = Vec_IntStart(p->nSatVars + 1);
+    vModel = Vec_IntStart(p->nSatVars + 1);
 
     if (p->vLevel > 1) printf("[Minr] fStandardDimacs: %d\n", fStandardDimacs);
 
     while (fgets(LineBuf, sizeof(LineBuf), pFile)) {
         if (strncmp(LineBuf, "v ", 2) == 0) {
-            if (vModel == NULL) vModel = Vec_IntStart(p->nSatVars + 1);
-            
             if (fStandardDimacs == 1) {
-                // Standard DIMACS: parse tokens from this line
                 char * pStr = LineBuf + 2;
                 char * pToken = strtok(pStr, " \t\r\n");
                 while (pToken) {
@@ -436,43 +622,27 @@ Vec_Int_t * Minr_CallSolver(Minr_Man_t * p, char * pFileName, char * pSolverPath
                     pToken = strtok(NULL, " \t\r\n");
                 }
             } else {
-                // Bitstring format: read character-by-character, may span multiple lines
                 int offset = 0;
                 int isFirstLine = 1;
-                
-                // Read bitstring, handling multi-line case when buffer is too small
                 while (offset < p->nSatVars) {
-                    char * pStr = isFirstLine ? (LineBuf + 2) : LineBuf;  // Skip "v " on first line only
+                    char * pStr = isFirstLine ? (LineBuf + 2) : LineBuf;
                     int i = 0;
-                    
-                    // Read characters from current line
                     while (pStr[i] && pStr[i] != '\n' && pStr[i] != '\r') {
                         if (offset + 1 > p->nSatVars) break;
                         Vec_IntWriteEntry(vModel, offset + 1, (pStr[i] == '1') ? 1 : 0);
                         offset++;
                         i++;
                     }
-                    
-                    // Check if done
                     if (offset >= p->nSatVars) break;
-                    if (pStr[i] == '\n' || pStr[i] == '\r') break;  // End of bitstring
-                    
-                    // Buffer was full (no newline found), read continuation from next line
-                    // Next line should be continuation of bitstring (no "v " prefix)
+                    if (pStr[i] == '\n' || pStr[i] == '\r') break;
                     if (!fgets(LineBuf, sizeof(LineBuf), pFile)) break;
-                    if (strncmp(LineBuf, "v ", 2) == 0) break;  // New model line, stop
-                    isFirstLine = 0;  // Subsequent lines don't have "v " prefix
+                    if (strncmp(LineBuf, "v ", 2) == 0) break;
+                    isFirstLine = 0;
                 }
             }
         }
     }
     fclose(pFile);
-
-    if (!fSat) {
-        printf("[Minr] Solver failed to find solution. Check log.\n");
-        if (vModel) Vec_IntFree(vModel);
-        return NULL;
-    }
     return vModel;
 }
 
@@ -540,9 +710,17 @@ int Minr_VerifyResult(Minr_Man_t * p, Vec_Int_t * vModel) {
                 }
             }
         } else {
-            // t == k: Set PIs to X (Scenario 1 Requirement)
-            Gia_ManForEachPi(pGia, pObj, iObj)
-                Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pObj), MINR_VAL_X);
+            // t == k: PIs from vPiAtK if set (-O 2 iter>1), else X
+            if (p->vPiAtK) {
+                int iPi;
+                Gia_ManForEachPi(pGia, pObj, iPi) {
+                    int Val = Vec_IntEntry(p->vPiAtK, iPi) ? MINR_VAL_1 : MINR_VAL_0;
+                    Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pObj), Val);
+                }
+            } else {
+                Gia_ManForEachPi(pGia, pObj, iObj)
+                    Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pObj), MINR_VAL_X);
+            }
         }
 
         // Set ROs from vCurrentState
@@ -562,6 +740,30 @@ int Minr_VerifyResult(Minr_Man_t * p, Vec_Int_t * vModel) {
                 Vec_IntWriteEntry(vCurrentState, k++, Val);
             }
         }
+    }
+
+    // 2b. Register mismatch stat at t=k (only for specified 0/1 registers)
+    // weak = X vs 0/1 (don't-care utilized); strong = 0 vs 1 (actual conflict)
+    {
+        int nRegs = Gia_ManRegNum(pGia);
+        int nSpec = 0, nWeak = 0, nStrong = 0;
+        for (int ri = 0; ri < nRegs; ri++) {
+            char tc = p->pInitStr[ri];
+            if (tc != '0' && tc != '1') continue;
+            nSpec++;
+            int simVal = Vec_IntEntry(vCurrentState, ri);
+            int tgtVal = (tc == '0') ? MINR_VAL_0 : MINR_VAL_1;
+            if (simVal == tgtVal) continue;
+            if (simVal == MINR_VAL_X)
+                nWeak++;
+            else
+                nStrong++;
+        }
+        p->simRegMismatchWeakPct   = (nSpec > 0) ? 100.0 * nWeak / nSpec : 0.0;
+        p->simRegMismatchStrongPct = (nSpec > 0) ? 100.0 * nStrong / nSpec : 0.0;
+        if (p->vLevel > 0)
+            printf("[Verify] Reg mismatch at t=k: weak(X vs 0/1)=%d, strong(0 vs 1)=%d, of %d specified\n",
+                   nWeak, nStrong, nSpec);
     }
 
     // 3. Verify Cut Constraints at t=k
@@ -708,52 +910,252 @@ void Minr_DecodeResult(Minr_Man_t * p, Vec_Int_t * vModel) {
 }
 
 ////////////////////////////////////////////////////////////////////////
+///                        REPORT DUMP                               ///
+////////////////////////////////////////////////////////////////////////
+
+static void Minr_DumpReport(Minr_Man_t * p)
+{
+    if (!p->pReportFile) return;
+
+    FILE * pFile = fopen(p->pReportFile, "w");
+    if (!pFile) {
+        printf("[Minr] Cannot open report file: %s\n", p->pReportFile);
+        return;
+    }
+
+    Gia_Man_t * pGia = p->pGia;
+    int nRegs = Gia_ManRegNum(pGia);
+    int nPI   = Gia_ManPiNum(pGia);
+
+    // Timestamp
+    time_t rawtime;
+    struct tm * ti;
+    char timebuf[64];
+    time(&rawtime);
+    ti = localtime(&rawtime);
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", ti);
+
+    // Runtime
+    double totalSec = (double)(Abc_Clock() - p->timeSolveStart) / CLOCKS_PER_SEC;
+    double solverSec = (double)p->timeSolver / CLOCKS_PER_SEC;
+    double refineSec = (double)p->timeRefine / CLOCKS_PER_SEC;
+
+    // Result counts
+    int nResetRequired = 0;
+    if (p->vRoVals0) {
+        int val, idx;
+        Vec_IntForEachEntry(p->vRoVals0, val, idx)
+            if (val == MINR_VAL_0 || val == MINR_VAL_1) nResetRequired++;
+    }
+    int nSpecRegs = 0;
+    for (int ri = 0; ri < nRegs; ri++)
+        if (p->pInitStr[ri] == '0' || p->pInitStr[ri] == '1') nSpecRegs++;
+    double resetRatio = nSpecRegs > 0 ? 100.0 * nResetRequired / nSpecRegs : 0.0;
+
+    // Solver status string
+    const char * pStatus;
+    switch (p->solverStatus) {
+        case 1:  pStatus = "optimum";  break;
+        case 2:  pStatus = "unsat";    break;
+        case 3:  pStatus = "error";    break;
+        case 4:  pStatus = "timeout";  break;
+        default: pStatus = "not_run";  break;
+    }
+
+    // --- [circuit] ---
+    const char * pName = Gia_ManName(pGia) ? Gia_ManName(pGia) : "unknown";
+    fprintf(pFile, "[circuit]\n");
+    fprintf(pFile, "name    = %s\n",  pName);
+    fprintf(pFile, "inputs  = %d\n",  nPI);
+    fprintf(pFile, "outputs = %d\n",  Gia_ManPoNum(pGia));
+    fprintf(pFile, "ff      = %d\n",  nRegs);
+    fprintf(pFile, "nodes   = %d\n",  Gia_ManAndNum(pGia));
+    fprintf(pFile, "\n");
+
+    // --- [settings] ---
+    fprintf(pFile, "[settings]\n");
+    fprintf(pFile, "k              = %d\n",  p->nFrames);
+    fprintf(pFile, "target_state   = %s\n",  p->pInitStr);
+    if (p->fRandTarget) {
+        fprintf(pFile, "random_seed    = %d\n",  p->seed);
+        fprintf(pFile, "random_cycles  = %d\n",  p->nRandomSim);
+    } else {
+        fprintf(pFile, "random_seed    = N/A\n");
+        fprintf(pFile, "random_cycles  = N/A\n");
+    }
+    if (p->nDontCarePercent > 0)
+        fprintf(pFile, "dontcare_pct   = %d\n",  p->nDontCarePercent);
+    fprintf(pFile, "refine_mode    = %d\n",  p->nRefineMode);
+    fprintf(pFile, "\n");
+
+    // --- [refine] --- (before result)
+    if (p->nRefineMode > 0) {
+        fprintf(pFile, "[refine]\n");
+        fprintf(pFile, "mode           = %d\n", p->nRefineMode);
+        fprintf(pFile, "released       = %d\n", p->nRefineReleased);
+        fprintf(pFile, "by_trial       = %d\n", p->nRefineByTrial);
+        fprintf(pFile, "by_core        = %d\n", p->nRefineByCore);
+        fprintf(pFile, "refine_sec     = %.3f\n", refineSec);
+        fprintf(pFile, "reset_before   = %d\n", nResetRequired + p->nRefineReleased);
+        fprintf(pFile, "\n");
+    }
+
+    // --- [result] ---
+    fprintf(pFile, "[result]\n");
+    fprintf(pFile, "solver_status  = %s\n",    pStatus);
+    fprintf(pFile, "required_reset = %d\n",    nResetRequired);
+    fprintf(pFile, "reset_ratio    = %.2f%%\n", resetRatio);
+    fprintf(pFile, "cut_verified   = %s\n",    (p->solverStatus == 1) ? (p->fVerifyPass ? "pass" : "fail") : "N/A");
+    fprintf(pFile, "cec_verified   = %s\n",    (p->solverStatus == 1) ? (p->fCecVerifyPass ? "pass" : "fail") : "N/A");
+    fprintf(pFile, "runtime_sec    = %.3f\n",  totalSec);
+    fprintf(pFile, "solver_sec     = %.3f\n",  solverSec);
+    fprintf(pFile, "timestamp      = %s\n",    timebuf);
+    if (p->vCutNodes)
+        fprintf(pFile, "cut_size       = %d\n", Vec_IntSize(p->vCutNodes));
+    if (p->vEqCutNodes)
+        fprintf(pFile, "eq_cut_size    = %d\n", Vec_IntSize(p->vEqCutNodes));
+    fprintf(pFile, "spec_ro_in_cut = %.2f%%\n", p->specRoCutRatio);
+    if (p->solverStatus == 1) {
+        fprintf(pFile, "sim_reg_mismatch_weak   = %.2f%%\n", p->simRegMismatchWeakPct);
+        fprintf(pFile, "sim_reg_mismatch_strong = %.2f%%\n", p->simRegMismatchStrongPct);
+    }
+    if (p->nOptimizeMode != 0) {
+        const char * pOptStatus;
+        switch (p->optStatus) {
+            case 0:  pOptStatus = "found_best";            break;
+            case 1:  pOptStatus = "timeout_with_best";     break;
+            case 2:  pOptStatus = "timeout_no_solution";   break;
+            default: pOptStatus = "unknown";               break;
+        }
+        fprintf(pFile, "opt_status     = %s\n", pOptStatus);
+        fprintf(pFile, "best_k         = %d\n", p->bestK);
+    }
+    fprintf(pFile, "\n");
+
+    // --- [details] ---
+    fprintf(pFile, "[details]\n");
+
+    if (p->solverStatus != 1) {
+        fprintf(pFile, "# No solution available.\n");
+        fclose(pFile);
+        printf("[Minr] Report written to %s\n", p->pReportFile);
+        return;
+    }
+
+    // PI sequence
+    fprintf(pFile, "# PI sequence (t=0 to t=%d)\n", p->nFrames - 1);
+    if (p->vPiVals && p->nFrames > 0) {
+        for (int t = 0; t < p->nFrames; t++) {
+            fprintf(pFile, "t=%d: ", t);
+            for (int i = 0; i < nPI; i++)
+                fprintf(pFile, "%d", Vec_IntEntry(p->vPiVals, t * nPI + i));
+            fprintf(pFile, "\n");
+        }
+    } else if (p->nFrames == 0) {
+        fprintf(pFile, "# (k=0, no PI steps)\n");
+    }
+    fprintf(pFile, "\n");
+
+    // FF reset list
+    fprintf(pFile, "# FF reset requirements (index value)\n");
+    if (p->vRoVals0) {
+        int val, idx;
+        Vec_IntForEachEntry(p->vRoVals0, val, idx) {
+            if (val == MINR_VAL_0 || val == MINR_VAL_1)
+                fprintf(pFile, "FF[%d] = %d\n", idx, val);
+        }
+    }
+
+    // --- [iterations] --- (-O 1 only)
+    if (p->nOptimizeMode == 1 && p->vOptIterK && Vec_IntSize(p->vOptIterK) > 0) {
+        fprintf(pFile, "\n[iterations]\n");
+        fprintf(pFile, "# k, result, time_ms\n");
+        int itr;
+        for (itr = 0; itr < Vec_IntSize(p->vOptIterK); itr++) {
+            int iterK      = Vec_IntEntry(p->vOptIterK, itr);
+            int iterResets  = Vec_IntEntry(p->vOptIterResets, itr);
+            int iterStatus  = Vec_IntEntry(p->vOptIterStatus, itr);
+            int iterTimeMs  = Vec_IntEntry(p->vOptIterTimeMs, itr);
+            if (iterResets >= 0)
+                fprintf(pFile, "k=%d, resets=%d, %dms\n", iterK, iterResets, iterTimeMs);
+            else {
+                const char * pTag;
+                switch (iterStatus) {
+                    case 2:  pTag = "unsat";   break;
+                    case 4:  pTag = "timeout"; break;
+                    default: pTag = "error";   break;
+                }
+                fprintf(pFile, "k=%d, %s, %dms\n", iterK, pTag, iterTimeMs);
+            }
+        }
+    }
+
+    // --- [optimize2_outer] --- (-O 2 only)
+    if (p->nOptimizeMode == 2 && p->vOpt2OuterSegmentTimeMs && Vec_IntSize(p->vOpt2OuterSegmentTimeMs) > 0) {
+        fprintf(pFile, "\n[optimize2_outer]\n");
+        int nOuter = Vec_IntSize(p->vOpt2OuterSegmentTimeMs);
+        int o;
+        for (o = 0; o < nOuter; o++) {
+            int segMs = Vec_IntEntry(p->vOpt2OuterSegmentTimeMs, o);
+            int bestR = Vec_IntEntry(p->vOpt2OuterBestResets, o);
+            int tgtR = (p->vOpt2OuterTargetResets && o < Vec_IntSize(p->vOpt2OuterTargetResets)) ? Vec_IntEntry(p->vOpt2OuterTargetResets, o) : -1;
+            fprintf(pFile, "outer=%d, target_resets=%d, segment_ms=%d, best_resets=%d\n", o, tgtR, segMs, bestR);
+            if (p->vOpt2OuterInnerK && o < Vec_WecSize(p->vOpt2OuterInnerK)) {
+                Vec_Int_t * vK = Vec_WecEntry(p->vOpt2OuterInnerK, o);
+                Vec_Int_t * vR = Vec_WecEntry(p->vOpt2OuterInnerResets, o);
+                Vec_Int_t * vT = Vec_WecEntry(p->vOpt2OuterInnerTimeMs, o);
+                int itr;
+                for (itr = 0; itr < Vec_IntSize(vK); itr++) {
+                    int ik = Vec_IntEntry(vK, itr);
+                    int ir = Vec_IntEntry(vR, itr);
+                    int it = Vec_IntEntry(vT, itr);
+                    if (ir >= 0)
+                        fprintf(pFile, "  k=%d, resets=%d, %dms\n", ik, ir, it);
+                    else
+                        fprintf(pFile, "  k=%d, fail, %dms\n", ik, it);
+                }
+            }
+        }
+    }
+
+    fclose(pFile);
+    printf("[Minr] Report written to %s\n", p->pReportFile);
+}
+
+////////////////////////////////////////////////////////////////////////
 ///                     MAIN SOLVER PROCEDURE                        ///
 ////////////////////////////////////////////////////////////////////////
 
-#if !defined(ABC_NAMESPACE)
-extern "C"
-#endif
-void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fRandTarget, int nRandomSim, char * pSolver, char * pOutDir, char * pPrefix, int vLevel, int seed) {
-    Minr_Man_t Man;
-    Minr_Man_t * p = &Man;
-    memset(p, 0, sizeof(Minr_Man_t));
-    
-    p->pGia = pGia;
-    p->nFrames = nFrames;
-    p->pInitStr = pInitStr;
-    p->fRandTarget = fRandTarget;
-    p->nRandomSim = nRandomSim;
-    p->pSolver = pSolver;
-    p->vLevel = vLevel;
-    p->vClauses = Vec_WecAlloc(1000);
-    p->timeStart = Abc_Clock();
-    p->seed = seed;
-
-    // Optional: derive target reset value by random multi-frame simulation (-r)
-    // After deriving, proceed as usual: PI=X propagation -> cut -> CNF -> solve.
-    char * pTargetInitStr = NULL;
-    if ( p->fRandTarget )
-    {
-        pTargetInitStr = Minr_DeriveTargetResetByRandomSim( pGia, p->pInitStr, p->nRandomSim, p->vLevel, p->seed );
-        if ( pTargetInitStr )
-            p->pInitStr = pTargetInitStr;
-        else
-            printf( "[Rand] Warning: failed to derive target reset value; using given -I\n" );
-    }
-
-    // 0. Pre-processing: Propagation & Cut
-    Minr_PropagateAndCut(p);
+/**
+ * Minr_SolveSingleK - Solve for a specific k value.
+ * Builds CNF, writes WCNF, calls solver, decodes, verifies.
+ * Returns the number of resets required, or -1 on failure/timeout.
+ * The caller is responsible for freeing p->vVarMap, p->vClauses etc.
+ * p->vPropVals and p->vCutNodes must already be set (from propagation).
+ */
+static int Minr_SolveSingleK(Minr_Man_t * p, double solverTimeout)
+{
+    Gia_Man_t * pGia = p->pGia;
+    int nFrames = p->nFrames;
 
     // 1. Allocate Vars
+    if (p->vVarMap) Vec_IntFree(p->vVarMap);
     p->vVarMap = Vec_IntStart(Gia_ManObjNum(pGia) * (nFrames + 1));
+    if (p->vClauses) Vec_WecFree(p->vClauses);
+    p->vClauses = Vec_WecAlloc(1000);
     p->nSatVars = 0;
+    if (p->vPiVals) { Vec_IntFree(p->vPiVals); p->vPiVals = NULL; }
+    if (p->vRoVals0) { Vec_IntFree(p->vRoVals0); p->vRoVals0 = NULL; }
+    p->solverStatus = 0;
+    p->fVerifyPass = 0;
+    p->timeSolver = 0;
+
     int iObj, t;
     Gia_Obj_t * pObj;
     for (t = 0; t <= nFrames; t++) {
         Gia_ManForEachObj(pGia, pObj, iObj) {
             p->nSatVars++; Vec_IntWriteEntry(p->vVarMap, iObj * (nFrames + 1) + t, p->nSatVars);
-            p->nSatVars++; 
+            p->nSatVars++;
         }
     }
 
@@ -761,29 +1163,27 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fRandTarget,
 
     // 2. Unrolling & Hard Constraints
     for (t = 0; t <= nFrames; t++) {
-        // Const0
         {
             int c0_T = Lit_T(p, 0, t), c0_F = Lit_F(p, 0, t);
             Minr_AddClause1(p, Abc_LitNot(c0_T)); Minr_AddClause1(p, c0_F);
         }
-        // Logic
         Gia_ManForEachObj(pGia, pObj, iObj) {
-            if (iObj == 0) continue; 
-            
+            if (iObj == 0) continue;
             if (Gia_ObjIsCi(pObj)) {
                 if (t < nFrames) {
-                    // t=0..k-1: PI must be binary (0/1), RO can be 0/1/X
                     if (Gia_ObjIsPi(pGia, pObj)) {
-                         Minr_AddBinaryConstraint(p, iObj, t);  // Force (T|F)
-                         Minr_AddIllegalStateCheck(p, iObj, t); // Force !(T&F)
+                         Minr_AddBinaryConstraint(p, iObj, t);
+                         Minr_AddIllegalStateCheck(p, iObj, t);
                     } else {
-                         // RO: only illegal check (can be X at t=0 for objective)
                          Minr_AddIllegalStateCheck(p, iObj, t);
                     }
                 } else {
-                    // t == k: PI must be unknown (X), RO only illegal check
                     if (Gia_ObjIsPi(pGia, pObj)) {
-                        Minr_AddUnknownConstraint(p, iObj, t);  // Force (!T & !F)
+                        if (p->vPiAtK) {
+                            /* fixed in separate pass below */
+                        } else {
+                            Minr_AddUnknownConstraint(p, iObj, t);
+                        }
                     } else {
                         Minr_AddIllegalStateCheck(p, iObj, t);
                     }
@@ -798,7 +1198,6 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fRandTarget,
                 Minr_AddIllegalStateCheck(p, iObj, t);
             }
         }
-        // Latch Transition
         if (t < nFrames) {
             int i;
             Gia_ManForEachRi(pGia, pObj, i) {
@@ -808,12 +1207,30 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fRandTarget,
         }
     }
 
+    // 2b. Fix PI at t=k when vPiAtK is set (-O 2, iteration > 1)
+    if (p->vPiAtK) {
+        int iPi;
+        Gia_ManForEachPi(pGia, pObj, iPi) {
+            int iObjPi = Gia_ObjId(pGia, pObj);
+            int val = Vec_IntEntry(p->vPiAtK, iPi);
+            int lit_T = Lit_T(p, iObjPi, nFrames);
+            int lit_F = Lit_F(p, iObjPi, nFrames);
+            if (val == 0) {
+                Minr_AddClause1(p, Abc_LitNot(lit_T));
+                Minr_AddClause1(p, lit_F);
+            } else {
+                Minr_AddClause1(p, lit_T);
+                Minr_AddClause1(p, Abc_LitNot(lit_F));
+            }
+        }
+    }
+
     // 3. Cut Constraints at t=k
     {
         int i, NodeId;
         Vec_IntForEachEntry(p->vCutNodes, NodeId, i) {
             int Val = Vec_IntEntry(p->vPropVals, NodeId);
-            if (Val == MINR_VAL_X) continue; 
+            if (Val == MINR_VAL_X) continue;
             int lit_T = Lit_T(p, NodeId, nFrames);
             int lit_F = Lit_F(p, NodeId, nFrames);
             if (Val == MINR_VAL_0) { Minr_AddClause1(p, Abc_LitNot(lit_T)); Minr_AddClause1(p, lit_F); }
@@ -840,18 +1257,21 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fRandTarget,
 
     // 5. Write WCNF
     char Buffer[1000];
-    const char * pFinalPrefix = pPrefix ? pPrefix : "minr_out";
-    const char * pFinalDir = pOutDir ? pOutDir : ".";
+    const char * pFinalPrefix = p->pPrefix ? p->pPrefix : "minr_out";
+    const char * pFinalDir = p->pOutDir ? p->pOutDir : "_/tmp";
 #ifdef WIN32
     mkdir(pFinalDir);
 #else
     mkdir(pFinalDir, 0777);
 #endif
-    sprintf(Buffer, "%s/%s.wcnf", pFinalDir, pFinalPrefix);
+    if (p->nOptimizeMode != 0)
+        sprintf(Buffer, "%s/%s_k%d.wcnf", pFinalDir, pFinalPrefix, nFrames);
+    else
+        sprintf(Buffer, "%s/%s.wcnf", pFinalDir, pFinalPrefix);
     if (p->vLevel > 0) printf("Writing WCNF to %s ...\n", Buffer);
     long long topWeight = Gia_ManRegNum(pGia) + 1;
     FILE * pFile = fopen(Buffer, "w");
-    if (!pFile) { printf("Error: Cannot open %s\n", Buffer); goto cleanup; }
+    if (!pFile) { printf("Error: Cannot open %s\n", Buffer); Vec_IntFree(vSoftLits); return -1; }
     fprintf(pFile, "p wcnf %d %d %lld\n", p->nSatVars, Vec_WecSize(p->vClauses) + Vec_IntSize(vSoftLits), topWeight);
     Vec_Int_t * vC; int k, Lit, i;
     Vec_WecForEachLevel(p->vClauses, vC, k) {
@@ -861,26 +1281,631 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fRandTarget,
     }
     Vec_IntForEachEntry(vSoftLits, Lit, k) fprintf(pFile, "1 %s%d 0\n", Abc_LitIsCompl(Lit) ? "-" : "", Abc_Lit2Var(Lit));
     fclose(pFile);
+    Vec_IntFree(vSoftLits);
 
-    // Call Solver & Decode & Verify
+    // Call Solver & Decode (PostRelax + Verify are done once in Minr_Solve)
     {
-        Vec_Int_t * vModel = Minr_CallSolver(p, Buffer, pSolver);
+        Vec_Int_t * vModel = Minr_CallSolver(p, Buffer, p->pSolver, solverTimeout);
         if (vModel) {
             Minr_DecodeResult(p, vModel);
-            // Run Verification (Scenario 1)
-            Minr_VerifyResult(p, vModel);
             Vec_IntFree(vModel);
         }
     }
 
-cleanup:
-    Vec_IntFree(p->vVarMap);
-    Vec_WecFree(p->vClauses);
-    Vec_IntFree(vSoftLits);
+    // Count resets
+    if (p->solverStatus == 1 && p->vRoVals0) {
+        int nResets = 0, val, idx;
+        Vec_IntForEachEntry(p->vRoVals0, val, idx)
+            if (val == MINR_VAL_0 || val == MINR_VAL_1) nResets++;
+        return nResets;
+    }
+    return -1;
+}
+
+/**
+ * Minr_SolveOptimize - Optimize mode: sweep k = 1, 2, 4, 8, 16, ...
+ * with total time budget, best-so-far tracking, and early stop.
+ */
+#if !defined(ABC_NAMESPACE)
+extern "C"
+#endif
+void Minr_SolveOptimize(Minr_Man_t * p)
+{
+    int nRegs = Gia_ManRegNum(p->pGia);
+    int kSchedule[] = {1, 2, 4, 8, 16, 32, 64, 128, 256};
+    int nSchedule = (int)(sizeof(kSchedule) / sizeof(kSchedule[0]));
+
+    p->bestK = -1;
+    p->bestResetCount = nRegs + 1;
+    p->vBestPiVals = NULL;
+    p->vBestRoVals0 = NULL;
+    p->bestSolverStatus = 0;
+    p->optStatus = 2;  // default: timeout_no_solution
+
+    p->vOptIterK      = Vec_IntAlloc(nSchedule);
+    p->vOptIterResets  = Vec_IntAlloc(nSchedule);
+    p->vOptIterStatus  = Vec_IntAlloc(nSchedule);
+    p->vOptIterTimeMs  = Vec_IntAlloc(nSchedule);
+
+    int prevResetCount = nRegs;  // for early stop comparison
+
+    printf("\n[Optimize] Starting k-sweep with %s time budget.\n",
+           p->totalTimeout > 0 ? "limited" : "unlimited");
+
+    for (int si = 0; si < nSchedule; si++) {
+        int curK = kSchedule[si];
+
+        // Check time budget
+        double elapsed = (double)(Abc_Clock() - p->timeSolveStart) / CLOCKS_PER_SEC;
+        double tRemain = 0;
+        if (p->totalTimeout > 0) {
+            tRemain = p->totalTimeout - elapsed;
+            if (tRemain <= 1.0) {
+                printf("[Optimize] Time budget exhausted (%.1fs elapsed). Stopping.\n", elapsed);
+                break;
+            }
+        }
+
+        printf("\n[Optimize] === Iteration k=%d (elapsed=%.1fs", curK, elapsed);
+        if (p->totalTimeout > 0)
+            printf(", remaining=%.1fs", tRemain);
+        printf(") ===\n");
+
+        p->nFrames = curK;
+
+        // Use remaining time as solver timeout (or 0 for unlimited)
+        double solverTimeout = (p->totalTimeout > 0) ? tRemain : 0;
+
+        abctime clkIter = Abc_Clock();
+        int nResets = Minr_SolveSingleK(p, solverTimeout);
+        int iterMs = (int)((double)(Abc_Clock() - clkIter) * 1000.0 / CLOCKS_PER_SEC);
+
+        Vec_IntPush(p->vOptIterK, curK);
+        Vec_IntPush(p->vOptIterResets, nResets);
+        Vec_IntPush(p->vOptIterStatus, p->solverStatus);
+        Vec_IntPush(p->vOptIterTimeMs, iterMs);
+
+        if (nResets >= 0) {
+            printf("[Optimize] k=%d: reset_needed=%d (%.2f%%)\n",
+                   curK, nResets, 100.0 * nResets / nRegs);
+
+            if (nResets < p->bestResetCount) {
+                // Update best-so-far
+                p->bestK = curK;
+                p->bestResetCount = nResets;
+                p->bestSolverStatus = p->solverStatus;
+                if (p->vBestPiVals) Vec_IntFree(p->vBestPiVals);
+                if (p->vBestRoVals0) Vec_IntFree(p->vBestRoVals0);
+                p->vBestPiVals = p->vPiVals ? Vec_IntDup(p->vPiVals) : NULL;
+                p->vBestRoVals0 = p->vRoVals0 ? Vec_IntDup(p->vRoVals0) : NULL;
+                p->optStatus = 0;  // found_best
+
+                printf("[Optimize] >> New best: k=%d, resets=%d\n", curK, nResets);
+            }
+
+            // Early stop: check improvement vs previous round
+            if (nResets == 0) {
+                printf("[Optimize] Perfect solution (0 resets). Stopping.\n");
+                break;
+            }
+            if (si > 0 && prevResetCount > 0) {
+                double improvement = (double)(prevResetCount - nResets) / prevResetCount;
+                if (improvement < (double)MINR_EARLY_STOP_IMPROVEMENT_RATIO) {
+                    printf("[Optimize] Improvement %.2f%% < threshold %.2f%%. Stopping.\n",
+                           improvement * 100.0, (double)MINR_EARLY_STOP_IMPROVEMENT_RATIO * 100.0);
+                    break;
+                }
+            }
+            prevResetCount = nResets;
+        } else {
+            printf("[Optimize] k=%d: no solution (status=%d)\n", curK, p->solverStatus);
+            if ((p->solverStatus == 4 || p->solverStatus == 2) && p->bestResetCount <= nRegs) {
+                p->optStatus = 1;  // timeout_with_best
+                printf("[Optimize] Solver %s. Keeping best-so-far.\n",
+                       p->solverStatus == 4 ? "timed out" : "returned UNSAT");
+                break;
+            }
+        }
+    }
+
+    // Restore best solution into p for report dumping
+    if (p->bestK >= 0) {
+        p->nFrames = p->bestK;
+        p->solverStatus = p->bestSolverStatus;
+        if (p->vPiVals) Vec_IntFree(p->vPiVals);
+        if (p->vRoVals0) Vec_IntFree(p->vRoVals0);
+        p->vPiVals = p->vBestPiVals;   p->vBestPiVals = NULL;
+        p->vRoVals0 = p->vBestRoVals0; p->vBestRoVals0 = NULL;
+
+        double totalSec = (double)(Abc_Clock() - p->timeSolveStart) / CLOCKS_PER_SEC;
+        printf("\n[Optimize] Final best: k=%d, resets=%d/%d (%.2f%%), total=%.3fs\n",
+               p->bestK, p->bestResetCount, nRegs,
+               100.0 * p->bestResetCount / nRegs, totalSec);
+    } else {
+        printf("\n[Optimize] No feasible solution found.\n");
+    }
+}
+
+/**
+ * Minr_SolveOptimize2 - -O 2: outer-loop heuristic.
+ * Outer loop: when time for current target exceeds budget/P, run cut verify,
+ * SAT refinement, set new target from current reset config, start next iteration.
+ * First iteration: t=k PI unknown. Later iterations: t=k PI = prev iteration's t=0 PI.
+ * Final solution: total t = sum of k over iterations; reset = last iteration's;
+ * input sequence = apply order: last iter, then second-to-last, ..., first.
+ * Constant-cut verify only before refinement each segment; CEC verify once at end.
+ */
+#if !defined(ABC_NAMESPACE)
+extern "C"
+#endif
+void Minr_SolveOptimize2(Minr_Man_t * p)
+{
+    Gia_Man_t * pGia = p->pGia;
+    int nRegs = Gia_ManRegNum(pGia);
+    int nPI = Gia_ManPiNum(pGia);
+    double segLimit = (p->totalTimeout > 0) ? (p->totalTimeout / (double)MINR_OPT_BUDGET_PARTS) : 1e20;
+    int kSchedule[] = {1, 2, 4, 8, 16, 32, 64, 128, 256};
+    int nSchedule = (int)(sizeof(kSchedule) / sizeof(kSchedule[0]));
+    p->vConcatPiVals = NULL;
+    p->vPiAtK = NULL;
+    char * pTargetStr = NULL;  /* owned by us after first re-target */
+    Vec_Wec_t * vOuterPiVals = Vec_WecAlloc(32);   /* each row = one outer's PI (flattened) */
+    Vec_Int_t * vOuterK = Vec_IntAlloc(32);
+    Vec_Wec_t * vOuterRoVals0 = Vec_WecAlloc(32); /* each row = one outer's RoVals0 (nRegs) */
+    int nOuter = 0;
+    int totalK = 0;
+    Vec_Int_t * vLastRoVals0 = NULL;
+    p->vOpt2OuterSegmentTimeMs = Vec_IntAlloc(32);
+    p->vOpt2OuterBestResets = Vec_IntAlloc(32);
+    p->vOpt2OuterTargetResets = Vec_IntAlloc(32);
+    p->vOpt2OuterInnerK = Vec_WecAlloc(32);
+    p->vOpt2OuterInnerResets = Vec_WecAlloc(32);
+    p->vOpt2OuterInnerTimeMs = Vec_WecAlloc(32);
+
+    p->bestK = -1;
+    p->bestResetCount = nRegs + 1;
+    p->optStatus = 2;
+
+    /* Save original pInitStr for final CEC (will be mutated during outer loop) */
+    char * pOrigInitStr = p->pInitStr;
+
+    printf("\n[Optimize2] Outer-loop heuristic, segment limit=%.2fs (1/%d of budget).\n",
+           segLimit, MINR_OPT_BUDGET_PARTS);
+
+    for (;; nOuter++) {
+        if (p->vLevel >= 3) printf("[Optimize2] >>> outer loop iteration nOuter=%d\n", nOuter);
+        double tOuterStart = (double)(Abc_Clock() - p->timeSolveStart) / CLOCKS_PER_SEC;
+        if (p->totalTimeout > 0 && tOuterStart >= p->totalTimeout - 0.5) {
+            printf("[Optimize2] Total time budget exhausted. Stopping.\n");
+            break;
+        }
+
+        if (nOuter > 0 && Vec_WecSize(vOuterPiVals) >= nOuter) {
+            Vec_Int_t * prevPi = Vec_WecEntry(vOuterPiVals, nOuter - 1);
+            if (p->vLevel >= 3) printf("[Optimize2] vPiAtK from prev segment: prevPi size=%d, nPI=%d\n", Vec_IntSize(prevPi), nPI);
+            p->vPiAtK = Vec_IntAlloc(nPI);
+            for (int i = 0; i < nPI && i < Vec_IntSize(prevPi); i++)
+                Vec_IntPush(p->vPiAtK, Vec_IntEntry(prevPi, i));
+            while (Vec_IntSize(p->vPiAtK) < nPI)
+                Vec_IntPush(p->vPiAtK, 0);
+            if (p->vLevel >= 3) printf("[Optimize2] vPiAtK size=%d\n", Vec_IntSize(p->vPiAtK));
+        } else {
+            p->vPiAtK = NULL;
+        }
+
+        /* Log target state for this outer iteration (reset count from pInitStr) */
+        {
+            int targetResets = 0, i;
+            for (i = 0; i < nRegs && p->pInitStr && p->pInitStr[i]; i++)
+                if (p->pInitStr[i] == '0' || p->pInitStr[i] == '1') targetResets++;
+            Vec_IntPush(p->vOpt2OuterTargetResets, targetResets);
+            if (p->vLevel > 0)
+                printf("[Optimize2] outer=%d, target_state_resets=%d (from previous solution reset)\n", nOuter, targetResets);
+        }
+        if (p->vLevel >= 3) printf("[Optimize2] calling Minr_PropagateAndCut (pInitStr=%p, nRegs=%d)\n", (void*)p->pInitStr, nRegs);
+
+        Minr_PropagateAndCut(p);
+        if (p->vLevel >= 3) printf("[Optimize2] Minr_PropagateAndCut done, cut size=%d\n", p->vCutNodes ? Vec_IntSize(p->vCutNodes) : -1);
+
+        double segStart = Abc_Clock();
+        int segBestResets = nRegs + 1;
+        Vec_Int_t * vInnerK = Vec_IntAlloc(16);
+        Vec_Int_t * vInnerResets = Vec_IntAlloc(16);
+        Vec_Int_t * vInnerTimeMs = Vec_IntAlloc(16);
+        int prevResetCount = nRegs;
+        int segBestK = -1;
+        Vec_Int_t * vSegBestPi = NULL;
+        Vec_Int_t * vSegBestRo = NULL;
+        int fSegmentUnsat = 0;  /* set when any k in this segment returns UNSAT → terminate after this segment */
+        int fBrokeSegmentLimit = 0;  /* set when we break inner loop due to segment time limit (already pushed vOpt2* and freed vInner*) */
+        int fBrokeEarlyStop = 0;     /* set when we break inner due to 0 resets or improvement threshold → then break outer */
+
+        /* When nOuter > 0, start k from (previous segment's last k) / 2 */
+        int startSi = 0;
+        if (nOuter > 0 && p->vOpt2OuterInnerK && Vec_WecSize(p->vOpt2OuterInnerK) >= nOuter) {
+            Vec_Int_t * prevInnerK = Vec_WecEntry(p->vOpt2OuterInnerK, nOuter - 1);
+            if (Vec_IntSize(prevInnerK) > 0) {
+                int lastKPrev = Vec_IntEntry(prevInnerK, Vec_IntSize(prevInnerK) - 1);
+                int startK = (lastKPrev >= 1) ? lastKPrev : 1;
+                for (startSi = 0; startSi < nSchedule && kSchedule[startSi] < startK; startSi++)
+                    ;
+                if (p->vLevel > 0)
+                    printf("[Optimize2] outer=%d: start k from %d (prev segment last k=%d)\n", nOuter, startSi < nSchedule ? kSchedule[startSi] : -1, lastKPrev);
+            }
+        }
+
+        for (int si = startSi; si < nSchedule; si++) {
+            int curK = kSchedule[si];
+            double elapsed = (double)(Abc_Clock() - p->timeSolveStart) / CLOCKS_PER_SEC;
+            if (p->totalTimeout > 0 && elapsed >= p->totalTimeout - 1.0) break;
+
+            double segElapsed = (double)(Abc_Clock() - segStart) / CLOCKS_PER_SEC;
+            if (segElapsed >= segLimit) {
+                if (p->vLevel > 0)
+                    printf("[Optimize2] Segment time (%.2fs) reached. Running cut verify + refine, then new target.\n", segElapsed);
+                int segMs = (int)((double)(Abc_Clock() - segStart) * 1000.0 / CLOCKS_PER_SEC);
+                int segBestR = (segBestResets <= nRegs) ? segBestResets : -1;
+                Vec_IntPush(p->vOpt2OuterSegmentTimeMs, segMs);
+                Vec_IntPush(p->vOpt2OuterBestResets, segBestR);
+                {
+                    Vec_Int_t * r = Vec_WecPushLevel(p->vOpt2OuterInnerK);
+                    Vec_IntAppend(r, vInnerK);
+                    r = Vec_WecPushLevel(p->vOpt2OuterInnerResets);
+                    Vec_IntAppend(r, vInnerResets);
+                    r = Vec_WecPushLevel(p->vOpt2OuterInnerTimeMs);
+                    Vec_IntAppend(r, vInnerTimeMs);
+                }
+                Vec_IntFree(vInnerK);
+                Vec_IntFree(vInnerResets);
+                Vec_IntFree(vInnerTimeMs);
+                /* Use segment best (not last k) as new target when available */
+                if (segBestK >= 0 && vSegBestPi && vSegBestRo) {
+                    if (p->vPiVals) Vec_IntFree(p->vPiVals);
+                    if (p->vRoVals0) Vec_IntFree(p->vRoVals0);
+                    p->vPiVals = Vec_IntDup(vSegBestPi);
+                    p->vRoVals0 = Vec_IntDup(vSegBestRo);
+                    p->nFrames = segBestK;
+                    p->solverStatus = 1;
+                }
+                if (p->solverStatus == 1 && p->vPiVals && p->vRoVals0) {
+                    p->fVerifyPass = Minr_VerifyResult(p, NULL);
+                    if (p->nRefineMode > 0) {
+                        abctime clkRef = Abc_Clock();
+                        Minr_SatRefine(p);
+                        p->timeRefine = Abc_Clock() - clkRef;
+                        if (p->nRefineMode > 0 && p->nRefineReleased > 0)
+                            p->fVerifyPass = Minr_SatVerify(p);
+                    }
+                    {
+                        int nR = 0, i;
+                        for (i = 0; i < nRegs; i++)
+                            if (Vec_IntEntry(p->vRoVals0, i) == MINR_VAL_0 || Vec_IntEntry(p->vRoVals0, i) == MINR_VAL_1) nR++;
+                        if (p->vLevel > 0)
+                            printf("[Optimize2] segment_limit: segment_best_resets=%d, new_target_resets=%d (reset state from this solution)\n", segBestResets <= nRegs ? segBestResets : -1, nR);
+                    }
+                    Vec_IntPush(vOuterK, p->nFrames);
+                    Vec_Int_t * row = Vec_WecPushLevel(vOuterPiVals);
+                    for (int i = 0; i < p->nFrames * nPI; i++)
+                        Vec_IntPush(row, Vec_IntEntry(p->vPiVals, i));
+                    row = Vec_WecPushLevel(vOuterRoVals0);
+                    for (int i = 0; i < nRegs; i++)
+                        Vec_IntPush(row, Vec_IntEntry(p->vRoVals0, i));
+                    char * pNew = (char *)malloc((size_t)(nRegs + 1));
+                    for (int i = 0; i < nRegs; i++) {
+                        int v = Vec_IntEntry(p->vRoVals0, i);
+                        pNew[i] = (v == MINR_VAL_0) ? '0' : (v == MINR_VAL_1) ? '1' : 'x';
+                    }
+                    pNew[nRegs] = '\0';
+                    if (pTargetStr) free(pTargetStr);
+                    pTargetStr = pNew;
+                    p->pInitStr = pTargetStr;
+                }
+                if (p->vPiAtK) { Vec_IntFree(p->vPiAtK); p->vPiAtK = NULL; }
+                fBrokeSegmentLimit = 1;
+                break;
+            }
+
+            p->nFrames = curK;
+            /* MaxSAT timeout = total remaining only; segment limit is only for deciding next segment */
+            double solverTimeout = (p->totalTimeout > 0) ? (p->totalTimeout - elapsed) : 0;
+            if (solverTimeout > 0 && solverTimeout < 1.0) break;
+
+            abctime clkIter = Abc_Clock();
+            int nResets = Minr_SolveSingleK(p, solverTimeout);
+            int iterMs = (int)((double)(Abc_Clock() - clkIter) * 1000.0 / CLOCKS_PER_SEC);
+
+            Vec_IntPush(vInnerK, curK);
+            Vec_IntPush(vInnerResets, nResets);
+            Vec_IntPush(vInnerTimeMs, iterMs);
+
+            if (nResets >= 0) {
+                if (nResets < segBestResets) {
+                    segBestResets = nResets;
+                    segBestK = curK;
+                    if (vSegBestPi) Vec_IntFree(vSegBestPi);
+                    if (vSegBestRo) Vec_IntFree(vSegBestRo);
+                    vSegBestPi = p->vPiVals ? Vec_IntDup(p->vPiVals) : NULL;
+                    vSegBestRo = p->vRoVals0 ? Vec_IntDup(p->vRoVals0) : NULL;
+                }
+                if (nResets == 0) {
+                    if (p->vLevel > 0) printf("[Optimize2] Perfect (0 resets). Stopping segment.\n");
+                    fBrokeEarlyStop = 1;
+                    break;
+                }
+                if (si > 0 && prevResetCount > 0) {
+                    double imp = (double)(prevResetCount - nResets) / prevResetCount;
+                    if (imp < (double)MINR_EARLY_STOP_IMPROVEMENT_RATIO) {
+                        fBrokeEarlyStop = 1;
+                        break;
+                    }
+                }
+                prevResetCount = nResets;
+            } else {
+                if (p->solverStatus == 2) fSegmentUnsat = 1;  /* UNSAT → do not run next segment */
+                if ((p->solverStatus == 4 || p->solverStatus == 2) && segBestResets <= nRegs) break;
+            }
+        }
+
+        /* Push segment stats and inner iteration data only when we did not break due to segment limit (that path already pushed and freed vInner*) */
+        if (!fBrokeSegmentLimit) {
+            int segMs = (int)((double)(Abc_Clock() - segStart) * 1000.0 / CLOCKS_PER_SEC);
+            Vec_IntPush(p->vOpt2OuterSegmentTimeMs, segMs);
+            Vec_IntPush(p->vOpt2OuterBestResets, segBestResets <= nRegs ? segBestResets : -1);
+            {
+                Vec_Int_t * r = Vec_WecPushLevel(p->vOpt2OuterInnerK);
+                Vec_IntAppend(r, vInnerK);
+                r = Vec_WecPushLevel(p->vOpt2OuterInnerResets);
+                Vec_IntAppend(r, vInnerResets);
+                r = Vec_WecPushLevel(p->vOpt2OuterInnerTimeMs);
+                Vec_IntAppend(r, vInnerTimeMs);
+            }
+            Vec_IntFree(vInnerK);
+            Vec_IntFree(vInnerResets);
+            Vec_IntFree(vInnerTimeMs);
+        }
+
+        /* Every segment: run cut verify + SAT refinement on segment best (when -x > 0); skip if we already did it in segment-limit path */
+        if (!fBrokeSegmentLimit && segBestK >= 0 && vSegBestPi && vSegBestRo && p->nRefineMode > 0) {
+            if (p->vPiVals) Vec_IntFree(p->vPiVals);
+            if (p->vRoVals0) Vec_IntFree(p->vRoVals0);
+            p->vPiVals = Vec_IntDup(vSegBestPi);
+            p->vRoVals0 = Vec_IntDup(vSegBestRo);
+            p->nFrames = segBestK;
+            p->solverStatus = 1;
+            p->fVerifyPass = Minr_VerifyResult(p, NULL);
+            abctime clkRef = Abc_Clock();
+            Minr_SatRefine(p);
+            p->timeRefine = Abc_Clock() - clkRef;
+            if (p->nRefineReleased > 0)
+                p->fVerifyPass = Minr_SatVerify(p);
+            Vec_IntFree(vSegBestPi);
+            Vec_IntFree(vSegBestRo);
+            vSegBestPi = p->vPiVals;
+            vSegBestRo = p->vRoVals0;
+            p->vPiVals = p->vRoVals0 = NULL;
+        }
+
+        /* Push segment best to vOuter* for concat at end; skip if we already pushed in segment-limit path */
+        if (!fBrokeSegmentLimit && segBestK >= 0 && vSegBestPi && vSegBestRo) {
+            Vec_IntPush(vOuterK, segBestK);
+            Vec_Int_t * row = Vec_WecPushLevel(vOuterPiVals);
+            Vec_IntAppend(row, vSegBestPi);
+            row = Vec_WecPushLevel(vOuterRoVals0);
+            Vec_IntAppend(row, vSegBestRo);
+            Vec_IntFree(vSegBestPi);
+            Vec_IntFree(vSegBestRo);
+            vSegBestPi = vSegBestRo = NULL;
+        }
+        if (p->vLevel > 0 && (segBestK >= 0 || Vec_IntSize(p->vOpt2OuterSegmentTimeMs) > 0))
+            printf("[Optimize2] outer=%d segment done: segment_best_resets=%d\n", nOuter, segBestResets <= nRegs ? segBestResets : -1);
+
+        if (p->vPiAtK) { Vec_IntFree(p->vPiAtK); p->vPiAtK = NULL; }
+
+        /* UNSAT in this segment → terminate entire process (no further segments) */
+        if (fSegmentUnsat) {
+            if (p->vLevel > 0) printf("[Optimize2] UNSAT in segment; terminating (no next segment).\n");
+            break;
+        }
+        /* No solution in this segment → no new target for next; terminate */
+        if (segBestK < 0) {
+            if (p->vLevel > 0) printf("[Optimize2] No solution in segment; terminating (no next segment).\n");
+            break;
+        }
+        /* Early stop (0 resets or improvement threshold) → terminate; do not run next segment */
+        if (fBrokeEarlyStop) {
+            if (p->vLevel > 0) printf("[Optimize2] Early stop in segment; terminating (no next segment).\n");
+            break;
+        }
+        double tTotal = (double)(Abc_Clock() - p->timeSolveStart) / CLOCKS_PER_SEC;
+        if (p->totalTimeout > 0 && tTotal >= p->totalTimeout - 0.5) break;
+        if (segBestResets == 0) break;
+        if (Vec_IntSize(vOuterK) == 0) break;  /* no solution at all so far → terminate */
+    }
+
+    nOuter = Vec_IntSize(vOuterK);
+    if (nOuter == 0) {
+        printf("[Optimize2] No feasible solution.\n");
+        Vec_WecFree(vOuterPiVals);
+        Vec_IntFree(vOuterK);
+        Vec_WecFree(vOuterRoVals0);
+        if (pTargetStr) free(pTargetStr);
+        Vec_IntFree(p->vOpt2OuterSegmentTimeMs);
+        Vec_IntFree(p->vOpt2OuterBestResets);
+        Vec_IntFree(p->vOpt2OuterTargetResets);
+        Vec_WecFree(p->vOpt2OuterInnerK);
+        Vec_WecFree(p->vOpt2OuterInnerResets);
+        Vec_WecFree(p->vOpt2OuterInnerTimeMs);
+        return;
+    }
+
+    /* Build vConcatPiVals: apply order = last outer first, ..., first outer last */
+    p->vConcatPiVals = Vec_IntAlloc(256);
+    for (int o = nOuter - 1; o >= 0; o--) {
+        int k = Vec_IntEntry(vOuterK, o);
+        Vec_Int_t * row = Vec_WecEntry(vOuterPiVals, o);
+        for (int i = 0; i < Vec_IntSize(row); i++)
+            Vec_IntPush(p->vConcatPiVals, Vec_IntEntry(row, i));
+        totalK += k;
+    }
+    vLastRoVals0 = Vec_WecEntry(vOuterRoVals0, nOuter - 1);
+    p->nFrames = totalK;
+    if (p->vPiVals) Vec_IntFree(p->vPiVals);
+    p->vPiVals = p->vConcatPiVals;
+    p->vConcatPiVals = NULL;
+    p->vRoVals0 = Vec_IntDup(vLastRoVals0);
+    p->solverStatus = 1;
+    int nResets = 0, ii, kk;
+    Vec_IntForEachEntry(p->vRoVals0, ii, kk)
+        if (ii == MINR_VAL_0 || ii == MINR_VAL_1) nResets++;
+    p->bestResetCount = nResets;
+    p->bestK = totalK;
+
+    /* Restore original pInitStr so CEC verifies against the true target */
+    p->pInitStr = pOrigInitStr;
+
+    p->fCecVerifyPass = Minr_CecVerify(p);
+    p->optStatus = 0;
+
+    printf("\n[Optimize2] Done: %d outer iterations, total k=%d, resets=%d, CEC=%s\n",
+           nOuter, totalK, nResets, p->fCecVerifyPass ? "pass" : "fail");
+
+    Vec_WecFree(vOuterPiVals);
+    Vec_IntFree(vOuterK);
+    Vec_WecFree(vOuterRoVals0);
+    if (pTargetStr) free(pTargetStr);
+}
+
+#if !defined(ABC_NAMESPACE)
+extern "C"
+#endif
+void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, char * pSolver, char * pOutDir, char * pPrefix, int vLevel, int seed, int nRefineMode, int fRefineBindDc, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent) {
+    Minr_Man_t Man;
+    Minr_Man_t * p = &Man;
+    memset(p, 0, sizeof(Minr_Man_t));
+    
+    p->pGia = pGia;
+    p->nFrames = nFrames;
+    p->pInitStr = pInitStr;
+    p->fExplicitInit = fExplicitInit;
+    p->fRandTarget = fRandTarget;
+    p->nRandomSim = nRandomSim;
+    p->pSolver = pSolver;
+    p->pOutDir = pOutDir;
+    p->pPrefix = pPrefix;
+    p->vLevel = vLevel;
+    p->seed = seed;
+    p->nRefineMode = nRefineMode;
+    p->fRefineBindDc = fRefineBindDc;
+    p->pReportFile = pReportFile;
+    p->nOptimizeMode = nOptimizeMode;
+    p->totalTimeout = totalTimeout;
+    p->nDontCarePercent = nDontCarePercent;
+
+    // Optional: derive target reset value by random multi-frame simulation (-r)
+    // If user didn't explicitly provide -I, pass NULL so random sim starts from random state.
+    // If user gave -I, pass that string so random sim starts from the specified state.
+    char * pTargetInitStr = NULL;
+    if ( p->fRandTarget )
+    {
+        int nSimFrames = (p->nRandomSim >= 0) ? p->nRandomSim : nFrames;
+        char * pSimInit = p->fExplicitInit ? p->pInitStr : NULL;
+        pTargetInitStr = Minr_DeriveTargetResetByRandomSim( pGia, pSimInit, nSimFrames, p->vLevel, p->seed );
+        if ( pTargetInitStr )
+            p->pInitStr = pTargetInitStr;
+        else
+            printf( "[Rand] Warning: failed to derive target reset value; using given -I\n" );
+    }
+
+    // Apply don't care masking (-D): randomly set a percentage of registers to 'x'
+    if ( p->nDontCarePercent > 0 && p->fRandTarget )
+    {
+        int nRegs = Gia_ManRegNum(pGia);
+        int nDC = nRegs * p->nDontCarePercent / 100;
+        if ( nDC > 0 )
+        {
+            // Fisher-Yates shuffle to pick nDC random indices
+            int * perm = ABC_ALLOC( int, nRegs );
+            for ( int i = 0; i < nRegs; i++ ) perm[i] = i;
+            Abc_Random( p->seed + 7 ); // seed the PRNG with a derived value
+            for ( int i = nRegs - 1; i > 0; i-- )
+            {
+                int j = Abc_Random(0) % (i + 1);
+                int tmp = perm[i]; perm[i] = perm[j]; perm[j] = tmp;
+            }
+            for ( int i = 0; i < nDC; i++ )
+                p->pInitStr[perm[i]] = 'x';
+            ABC_FREE( perm );
+            if ( p->vLevel > 0 )
+                printf( "[DontCare] Set %d/%d registers (%.0f%%) to don't care.\n",
+                        nDC, nRegs, 100.0 * nDC / nRegs );
+        }
+    }
+
+    p->timeSolveStart = Abc_Clock();
+
+    // 0. Pre-processing: Propagation & Cut (shared across all k values)
+    Minr_PropagateAndCut(p);
+
+    // Solve phase
+    if ( nOptimizeMode == 1 )
+    {
+        Minr_SolveOptimize( p );
+    }
+    else if ( nOptimizeMode == 2 )
+    {
+        Minr_SolveOptimize2( p );
+    }
+    else
+    {
+        p->vVarMap = NULL;
+        p->vClauses = NULL;
+        double solverTimeout = (totalTimeout > 0) ? totalTimeout : 0;
+        Minr_SolveSingleK(p, solverTimeout);
+    }
+
+    // Post-processing: Refine + Verify (runs once; -O 2 does its own inside Optimize2)
+    if ( p->solverStatus == 1 && p->nOptimizeMode != 2 )
+    {
+        if ( p->nRefineMode > 0 )
+        {
+            abctime clkRef = Abc_Clock();
+            Minr_SatRefine( p );
+            p->timeRefine = Abc_Clock() - clkRef;
+            if ( p->vLevel > 0 )
+                Abc_PrintTime(1, "[Refine] Refine time", p->timeRefine);
+        }
+        // Always run x-simulation verify (computes simRegMismatchWeak/StrongPct)
+        p->fVerifyPass = Minr_VerifyResult(p, NULL);
+        // If refine modified result, also run SAT verify (overrides cut_verified)
+        if ( p->nRefineMode > 0 && p->nRefineReleased > 0 )
+            p->fVerifyPass = Minr_SatVerify( p );
+
+        // CEC-based verification (compares all PO/RI, not just cut)
+        p->fCecVerifyPass = Minr_CecVerify( p );
+    }
+
+    Minr_DumpReport( p );
+
+    // Cleanup
+    if (p->vVarMap) Vec_IntFree(p->vVarMap);
+    if (p->vClauses) Vec_WecFree(p->vClauses);
     if (p->vPropVals) Vec_IntFree(p->vPropVals);
     if (p->vCutNodes) Vec_IntFree(p->vCutNodes);
+    if (p->vEqCutNodes) Vec_IntFree(p->vEqCutNodes);
     if (p->vPiVals) Vec_IntFree(p->vPiVals);
     if (p->vRoVals0) Vec_IntFree(p->vRoVals0);
+    if (p->vBestPiVals) Vec_IntFree(p->vBestPiVals);
+    if (p->vBestRoVals0) Vec_IntFree(p->vBestRoVals0);
+    if (p->vOptIterK) Vec_IntFree(p->vOptIterK);
+    if (p->vOptIterResets) Vec_IntFree(p->vOptIterResets);
+    if (p->vOptIterStatus) Vec_IntFree(p->vOptIterStatus);
+    if (p->vOptIterTimeMs) Vec_IntFree(p->vOptIterTimeMs);
+    if (p->vOpt2OuterSegmentTimeMs) Vec_IntFree(p->vOpt2OuterSegmentTimeMs);
+    if (p->vOpt2OuterBestResets) Vec_IntFree(p->vOpt2OuterBestResets);
+    if (p->vOpt2OuterTargetResets) Vec_IntFree(p->vOpt2OuterTargetResets);
+    if (p->vOpt2OuterInnerK) Vec_WecFree(p->vOpt2OuterInnerK);
+    if (p->vOpt2OuterInnerResets) Vec_WecFree(p->vOpt2OuterInnerResets);
+    if (p->vOpt2OuterInnerTimeMs) Vec_WecFree(p->vOpt2OuterInnerTimeMs);
     if (pTargetInitStr) free(pTargetInitStr);
 }
 
