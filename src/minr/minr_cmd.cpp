@@ -37,6 +37,8 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
     int seed = 0;               // -r (seed)
     int nRefineMode = 0;        // -x <mode>: 0=off, 1=CEC, 2=cut, 3=eq cut
     int fRefineBindDc = 0;      // -X: bind don't-care ROs (only with -x)
+    int nRefineConfLimit = 10000; // -c <int>: SAT refine conflict limit (default 10000)
+    int fRefineCoreOnly = 0;      // -C: core-only refine (skip trial release)
     char* pReportFile = NULL;   // -o <filename>
     int nOptimizeMode = 0;      // -O [<mode>]: 0=off, 1=sweep k, 2=outer-loop heuristic
     double totalTimeout = 0.0;  // -t <sec> (total time budget)
@@ -44,7 +46,7 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
     int nDontCarePercent = 0;   // -D <1..99> don't care percentage (requires -r)
     
     Extra_UtilGetoptReset();
-    while ((c = Extra_UtilGetopt(argc, argv, "k:I:S:d:D:p:v:r:R:o:t:x:O:Xh")) != EOF) {
+    while ((c = Extra_UtilGetopt(argc, argv, "k:I:S:d:D:p:v:r:R:o:t:x:O:c:CXh")) != EOF) {
         switch (c) {
             case 'k':
                 if (globalUtilOptarg == NULL || globalUtilOptarg[0] == '\0') {
@@ -154,6 +156,17 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
             case 'X':
                 fRefineBindDc = 1;
                 break;
+            case 'c':
+                if (globalUtilOptarg == NULL || globalUtilOptarg[0] == '\0') {
+                    Abc_Print(-1, "Command line switch \"-c\" should be followed by an integer.\n");
+                    goto usage;
+                }
+                nRefineConfLimit = atoi(globalUtilOptarg);
+                if (nRefineConfLimit < 0) goto usage;
+                break;
+            case 'C':
+                fRefineCoreOnly = 1;
+                break;
             case 'h':
                 goto usage;
             default:
@@ -239,20 +252,25 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
         return 0;
     }
 
+    // Default solver: use in-process EvalMaxSAT2022 IPAMIR shared library.
+    if (pSolver == NULL)
+        pSolver = (char *)"third_party/EvalMaxSAT2022/libipamirEvalMaxSAT2022.so";
+
     // Call Minr_Solve function
-    Minr_Solve(pGia, nFrames, pInitStr, fExplicitInit, fRandTarget, nRandomSim, pSolver, pOutDir, pPrefix, vLevel, seed, nRefineMode, fRefineBindDc, pReportFile, nOptimizeMode, totalTimeout, nDontCarePercent);
+    Minr_Solve(pGia, nFrames, pInitStr, fExplicitInit, fRandTarget, nRandomSim, pSolver, pOutDir, pPrefix, vLevel, seed, nRefineMode, fRefineBindDc, nRefineConfLimit, fRefineCoreOnly, pReportFile, nOptimizeMode, totalTimeout, nDontCarePercent);
 
     if (pInitStrAlloc) free(pInitStrAlloc);
     return 0;
 
 usage:
-    Abc_Print(-2, "usage: &minr [-k <int>] [-I <string>] [-r [<seed>]] [-R <num>] [-D <pct>] [-S <path>] [-d <dir>] [-p <prefix>] [-o <file>] [-v <level>] [-t <sec>] [-x <mode>] [-O <mode>]\n");
+    Abc_Print(-2, "usage: &minr [-k <int>] [-I <string>] [-r [<seed>]] [-R <num>] [-D <pct>] [-S <path>] [-d <dir>] [-p <prefix>] [-o <file>] [-v <level>] [-t <sec>] [-x <mode>] [-c <nConf>] [-C] [-O <mode>]\n");
     Abc_Print(-2, "\t-k <int>    : timeframe expansion depth (t=0..k), k=0 means single frame\n");
     Abc_Print(-2, "\t-I <string> : initial value for latches (0,1,x); default all 0; length = nRegs\n");
     Abc_Print(-2, "\t-r [<seed>] : derive target reset by random simulation (optional seed)\n");
     Abc_Print(-2, "\t-R <num>    : number of random simulation frames (default=k if -r given, 0=no sim)\n");
     Abc_Print(-2, "\t-D <pct>    : set <pct>%% (1-99) of target registers to don't care (requires -r)\n");
-    Abc_Print(-2, "\t-S <path>   : path to MaxSAT solver binary (default _/EvalMaxSAT)\n");
+    Abc_Print(-2, "\t-S <path>   : path to MaxSAT solver binary (default third_party/EvalMaxSAT2022/libipamirEvalMaxSAT2022.so)\n");
+    Abc_Print(-2, "\t             or path to IPAMIR shared library (.so) for in-process solving\n");
     Abc_Print(-2, "\t-d <dir>    : output directory\n");
     Abc_Print(-2, "\t-p <prefix> : output filename prefix\n");
     Abc_Print(-2, "\t-o <file>   : dump structured report to file\n");
@@ -260,6 +278,8 @@ usage:
     Abc_Print(-2, "\t-t <sec>    : total time budget in seconds (used with -O or single -k mode)\n");
     Abc_Print(-2, "\t-x <mode>   : SAT-based post-refine (0=off, 1=CEC, 2=cut, 3=eq cut)\n");
     Abc_Print(-2, "\t-X          : bind don't-care target ROs to unrolled t=k (only with -x)\n");
+    Abc_Print(-2, "\t-c <nConf>  : SAT refine conflict limit (default 10000, 0=unlimited)\n");
+    Abc_Print(-2, "\t-C          : core-only refine (skip trial release; do one UNSAT-core release)\n");
     Abc_Print(-2, "\t-O <mode>   : optimize mode (1=sweep k, 2=outer-loop); argument required\n");
     Abc_Print(-2, "\t-h          : print the command usage\n");
     return 1;

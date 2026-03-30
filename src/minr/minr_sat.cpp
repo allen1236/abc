@@ -488,26 +488,36 @@ void Minr_SatRefine(Minr_Man_t * p)
     // ---- Pass 1: solve with all resets → UNSAT core bulk release ----
     {
         Vec_Int_t * vA = buildAssumps(-1);
+        int nConf = p->nRefineConfLimit;
         int status = sat_solver_solve(ctx->pSat,
-            Vec_IntArray(vA), Vec_IntArray(vA) + Vec_IntSize(vA), 0, 0, 0, 0);
+            Vec_IntArray(vA), Vec_IntArray(vA) + Vec_IntSize(vA), nConf, 0, 0, 0);
         Vec_IntFree(vA);
 
+        /* NOTE: If conflict limit reached, status can be l_Undef (unknown).
+           In refine, unknown must be treated as "cannot release". */
         if (status != l_False) {
-            printf("[Refine] WARNING: initial solve is SAT — no resets released.\n");
+            if (status == l_Undef)
+                printf("[Refine] WARNING: initial solve is UNKNOWN (conflict limit reached) — no resets released.\n");
+            else
+                printf("[Refine] WARNING: initial solve is SAT — no resets released.\n");
             goto cleanup;
         }
         releaseByCore();
     }
 
     // ---- Pass 2: one-by-one trial, no outer loop ----
+    if (p->fRefineCoreOnly)
+        goto cleanup;
     for (int i = 0; i < nFixed; i++) {
         if (!Vec_IntEntry(vActive, i)) continue;
 
         Vec_Int_t * vA = buildAssumps(i);
+        int nConf = p->nRefineConfLimit;
         int status = sat_solver_solve(ctx->pSat,
-            Vec_IntArray(vA), Vec_IntArray(vA) + Vec_IntSize(vA), 0, 0, 0, 0);
+            Vec_IntArray(vA), Vec_IntArray(vA) + Vec_IntSize(vA), nConf, 0, 0, 0);
         Vec_IntFree(vA);
 
+        /* Only UNSAT allows releasing this reset. SAT or UNKNOWN => keep it. */
         if (status == l_False) {
             Vec_IntWriteEntry(vActive, i, 0);
             Vec_IntWriteEntry(p->vRoVals0, Vec_IntEntry(vResetReg, i), MINR_VAL_X);

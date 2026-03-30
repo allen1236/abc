@@ -43,6 +43,8 @@ struct Minr_Man_t_
     int         seed;       // Random seed
     int         nRefineMode;    // -x <mode>: 0=off, 1=CEC, 2=cut, 3=eq cut
     int         fRefineBindDc;  // -X: bind don't-care target ROs to unrolled t=k (only with -x)
+    int         nRefineConfLimit; // -c <int>: SAT refine conflict limit (0=unlimited)
+    int         fRefineCoreOnly;  // -C: core-only refine (skip trial release)
     char *      pReportFile;    // Report output filename (-o)
     int         nOptimizeMode;  // -O <mode>: 0=off, 1=sweep k, 2=outer-loop heuristic
     double      totalTimeout;   // Total time budget in seconds (-t)
@@ -114,7 +116,7 @@ struct Minr_Man_t_
 
 extern void Minr_ExtractCut( Minr_Man_t * p );
 extern void Minr_ExtractEqCut( Minr_Man_t * p );
-extern void Minr_Solve( Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, char * pSolver, char * pOutDir, char * pPrefix, int vLevel, int seed, int nRefineMode, int fRefineBindDc, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent );
+extern void Minr_Solve( Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, char * pSolver, char * pOutDir, char * pPrefix, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent );
 extern void Minr_SolveOptimize( Minr_Man_t * p );
 extern void Minr_SolveOptimize2( Minr_Man_t * p );
 
