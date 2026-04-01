@@ -1058,8 +1058,9 @@ static void Minr_DumpReport(Minr_Man_t * p)
     ti = localtime(&rawtime);
     strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", ti);
 
-    // Runtime
-    double totalSec = (double)(Abc_Clock() - p->timeSolveStart) / CLOCKS_PER_SEC;
+    // Runtime (exclude verification if timeSolveEnd set)
+    abctime clkEnd = p->timeSolveEnd ? p->timeSolveEnd : Abc_Clock();
+    double totalSec = (double)(clkEnd - p->timeSolveStart) / CLOCKS_PER_SEC;
     double solverSec = (double)p->timeSolver / CLOCKS_PER_SEC;
     double refineSec = (double)p->timeRefine / CLOCKS_PER_SEC;
 
@@ -1171,6 +1172,26 @@ static void Minr_DumpReport(Minr_Man_t * p)
         fprintf(pFile, "opt_status     = %s\n", pOptStatus);
         fprintf(pFile, "best_k         = %d\n", p->bestK);
     }
+    /* k=0 metrics (only meaningful for -O 1 which sweeps k and logs iterations) */
+    if (p->nOptimizeMode == 1 && p->vOptIterK && p->vOptIterResets) {
+        int found = 0;
+        for (int itr = 0; itr < Vec_IntSize(p->vOptIterK); itr++) {
+            if (Vec_IntEntry(p->vOptIterK, itr) != 0) continue;
+            int r0 = Vec_IntEntry(p->vOptIterResets, itr);
+            if (r0 < 0) break;
+            fprintf(pFile, "k0_reset_ratio = %.2f%%\n", nRegs > 0 ? 100.0 * r0 / nRegs : 0.0);
+            if (nSpecRegs > 0)
+                fprintf(pFile, "k0_reduction   = %.2f%%\n", 100.0 * (1.0 - (double)r0 / (double)nSpecRegs));
+            else
+                fprintf(pFile, "k0_reduction   = N/A\n");
+            found = 1;
+            break;
+        }
+        if (!found) {
+            fprintf(pFile, "k0_reset_ratio = N/A\n");
+            fprintf(pFile, "k0_reduction   = N/A\n");
+        }
+    }
     fprintf(pFile, "\n");
 
     // --- [details] ---
@@ -1197,14 +1218,15 @@ static void Minr_DumpReport(Minr_Man_t * p)
     }
     fprintf(pFile, "\n");
 
-    // FF reset list
-    fprintf(pFile, "# FF reset requirements (index value)\n");
+    // FF reset requirements string (index i = i-th character)
+    fprintf(pFile, "# FF reset requirements (01x string; index i = i-th character)\n");
     if (p->vRoVals0) {
-        int val, idx;
-        Vec_IntForEachEntry(p->vRoVals0, val, idx) {
-            if (val == MINR_VAL_0 || val == MINR_VAL_1)
-                fprintf(pFile, "FF[%d] = %d\n", idx, val);
+        for (int i = 0; i < nRegs; i++) {
+            int v = Vec_IntEntry(p->vRoVals0, i);
+            char c = (v == MINR_VAL_0) ? '0' : (v == MINR_VAL_1) ? '1' : 'x';
+            fputc(c, pFile);
         }
+        fputc('\n', pFile);
     }
 
     // --- [iterations] --- (-O 1 only)
@@ -1774,7 +1796,7 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
             double segElapsed = (double)(Abc_Clock() - segStart) / CLOCKS_PER_SEC;
             if (segElapsed >= segLimit) {
                 if (p->vLevel > 0)
-                    printf("[Optimize2] Segment time (%.2fs) reached. Running cut verify + refine, then new target.\n", segElapsed);
+                    printf("[Optimize2] Segment time (%.2fs) reached. Running refine, then new target.\n", segElapsed);
                 int segMs = (int)((double)(Abc_Clock() - segStart) * 1000.0 / CLOCKS_PER_SEC);
                 int segBestR = (segBestResets <= nRegs) ? segBestResets : -1;
                 Vec_IntPush(p->vOpt2OuterSegmentTimeMs, segMs);
@@ -1800,13 +1822,10 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
                     p->solverStatus = 1;
                 }
                 if (p->solverStatus == 1 && p->vPiVals && p->vRoVals0) {
-                    p->fVerifyPass = Minr_VerifyResult(p, NULL);
                     if (p->nRefineMode > 0) {
                         abctime clkRef = Abc_Clock();
                         Minr_SatRefine(p);
                         p->timeRefine = Abc_Clock() - clkRef;
-                        if (p->nRefineMode > 0 && p->nRefineReleased > 0)
-                            p->fVerifyPass = Minr_SatVerify(p);
                     }
                     {
                         int nR = 0, i;
@@ -1904,12 +1923,9 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
             p->vRoVals0 = Vec_IntDup(vSegBestRo);
             p->nFrames = segBestK;
             p->solverStatus = 1;
-            p->fVerifyPass = Minr_VerifyResult(p, NULL);
             abctime clkRef = Abc_Clock();
             Minr_SatRefine(p);
             p->timeRefine = Abc_Clock() - clkRef;
-            if (p->nRefineReleased > 0)
-                p->fVerifyPass = Minr_SatVerify(p);
             Vec_IntFree(vSegBestPi);
             Vec_IntFree(vSegBestRo);
             vSegBestPi = p->vPiVals;
@@ -2000,6 +2016,9 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
     /* Restore original pInitStr so CEC verifies against the true target */
     p->pInitStr = pOrigInitStr;
 
+    // End of "runtime_sec" measurement: after optimize2 solving, before final verification.
+    p->timeSolveEnd = Abc_Clock();
+
     p->fCecVerifyPass = Minr_CecVerify(p);
     p->optStatus = 0;
 
@@ -2081,6 +2100,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     }
 
     p->timeSolveStart = Abc_Clock();
+    p->timeSolveEnd = 0;
 
     // 0. Pre-processing: Propagation & Cut (shared across all k values)
     Minr_PropagateAndCut(p);
@@ -2113,6 +2133,8 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
             if ( p->vLevel > 0 )
                 Abc_PrintTime(1, "[Refine] Refine time", p->timeRefine);
         }
+        // End of "runtime_sec" measurement: after refine, before verification.
+        p->timeSolveEnd = Abc_Clock();
         // Always run x-simulation verify (computes simRegMismatchWeak/StrongPct)
         p->fVerifyPass = Minr_VerifyResult(p, NULL);
         // If refine modified result, also run SAT verify (overrides cut_verified)
@@ -2121,6 +2143,11 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
 
         // CEC-based verification (compares all PO/RI, not just cut)
         p->fCecVerifyPass = Minr_CecVerify( p );
+    }
+    else if ( p->nOptimizeMode != 2 )
+    {
+        // No solution (or -x off): still stop timer before any verification.
+        p->timeSolveEnd = Abc_Clock();
     }
 
     Minr_DumpReport( p );

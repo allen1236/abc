@@ -81,6 +81,7 @@ struct Minr_Man_t_
     int         fVerifyPass;    // cut-based verification result (1=pass, 0=fail)
     int         fCecVerifyPass; // CEC-based verification result (1=pass, 0=fail)
     abctime     timeSolveStart; // timer start (after target state derived)
+    abctime     timeSolveEnd;   // timer end (before verification); 0 = use current time
     abctime     timeSolver;     // MaxSAT solver wall-clock time
 
     // -O 2 only: intermediate target state and concatenated output
