@@ -11,7 +11,9 @@
 #include "minr.h"
 #include "minr_ipamir_dyn.h"
 #include <chrono>
+#include <signal.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <time.h>
 
@@ -547,11 +549,12 @@ static Vec_Int_t * Minr_CallSolverIpamir( Minr_Man_t * p, Vec_Wec_t * vHardClaus
     }
 
     struct Minr_TermState_t {
-        std::chrono::steady_clock::time_point deadline;
+        abctime startCpu;
+        abctime limitCpu; // CPU ticks (CLOCKS_PER_SEC based)
     };
     auto TermCb = [](void * pState) -> int {
         auto * st = (Minr_TermState_t *)pState;
-        return std::chrono::steady_clock::now() >= st->deadline;
+        return (Abc_Clock() - st->startCpu) >= st->limitCpu;
     };
     Minr_TermState_t TermState;
 
@@ -579,8 +582,8 @@ static Vec_Int_t * Minr_CallSolverIpamir( Minr_Man_t * p, Vec_Wec_t * vHardClaus
 
     // Attach time limit if requested (timeoutSec > 0).
     if ( Api.ipamir_set_terminate && timeoutSec > 0 ) {
-        TermState.deadline = std::chrono::steady_clock::now() +
-            std::chrono::milliseconds( (long long)(timeoutSec * 1000.0) );
+        TermState.startCpu = Abc_Clock();
+        TermState.limitCpu = (abctime)(timeoutSec * (double)CLOCKS_PER_SEC);
         Api.ipamir_set_terminate( s, &TermState, TermCb );
     }
 
@@ -590,7 +593,7 @@ static Vec_Int_t * Minr_CallSolverIpamir( Minr_Man_t * p, Vec_Wec_t * vHardClaus
 
     if ( st == 0 )
     {
-        printf("[Minr] Solver timed out (%.1f sec limit).\n", timeoutSec);
+        printf("[Minr] Solver timed out (%.1f sec CPU limit).\n", timeoutSec);
         p->solverStatus = 4;
         Api.ipamir_release( s );
         Minr_IpamirApiUnload( &Api );
@@ -629,7 +632,6 @@ static Vec_Int_t * Minr_CallSolverIpamir( Minr_Man_t * p, Vec_Wec_t * vHardClaus
 }
 
 Vec_Int_t * Minr_CallSolver(Minr_Man_t * p, char * pFileName, char * pSolverPath, double timeoutSec) {
-    char Command[2000];
     char LogFile[1000];
     sprintf(LogFile, "%s.log", pFileName);
 
@@ -640,22 +642,87 @@ Vec_Int_t * Minr_CallSolver(Minr_Man_t * p, char * pFileName, char * pSolverPath
         return NULL;
     }
 
-    if (timeoutSec > 0)
-        sprintf(Command, "timeout %.1f %s %s > %s", timeoutSec, pPath, pFileName, LogFile);
-    else
-        sprintf(Command, "%s %s > %s", pPath, pFileName, LogFile);
-    if (p->vLevel > 0) printf("Running solver: %s\n", Command);
-    
+    // Run external solver with CPU-time limit (timeoutSec). If timeoutSec == 0, run unlimited.
+    // CPU time here refers to the child process CPU usage (utime+stime).
+    pid_t pid;
     abctime clk = Abc_Clock();
-    int ret = system(Command);
+    {
+        pid = fork();
+        if (pid == -1) {
+            perror("[Minr] fork");
+            p->solverStatus = 3;
+            return NULL;
+        }
+        if (pid == 0) {
+            // child: redirect stdout to log file, then exec solver
+            FILE * f = freopen(LogFile, "w", stdout);
+            (void)f;
+            // also redirect stderr to stdout for easier debug
+            dup2(fileno(stdout), fileno(stderr));
+            execl(pPath, pPath, pFileName, (char *)NULL);
+            perror("[Minr] exec");
+            _exit(127);
+        }
+    }
+
+    long hz = sysconf(_SC_CLK_TCK);
+    long long cpuLimitTicks = (timeoutSec > 0) ? (long long)(timeoutSec * (double)hz) : -1;
+    int status = 0;
+    int timedOut = 0;
+    for (;;) {
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid) break;
+        if (w == -1) {
+            perror("[Minr] waitpid");
+            p->solverStatus = 3;
+            break;
+        }
+
+        if (cpuLimitTicks >= 0) {
+            // read /proc/<pid>/stat for utime+stime
+            char path[128];
+            sprintf(path, "/proc/%d/stat", (int)pid);
+            FILE * fp = fopen(path, "r");
+            if (fp) {
+                // format: pid (comm) state ppid ... utime stime ...
+                int rpid = 0;
+                char comm[256];
+                char state = 0;
+                // read first 3 fields; comm may contain spaces but is wrapped in ()
+                if (fscanf(fp, "%d %255s %c", &rpid, comm, &state) == 3) {
+                    // skip fields 4..13 (10 ints/lls), then read utime/stime (14/15)
+                    long long dummy;
+                    for (int i = 0; i < 10; i++) {
+                        if (fscanf(fp, "%lld", &dummy) != 1) { dummy = 0; break; }
+                    }
+                    unsigned long long ut = 0, stt = 0;
+                    if (fscanf(fp, "%llu %llu", &ut, &stt) == 2) {
+                        long long used = (long long)(ut + stt);
+                        if (used >= cpuLimitTicks) {
+                            timedOut = 1;
+                            kill(pid, SIGKILL);
+                        }
+                    }
+                }
+                fclose(fp);
+            }
+        }
+        // 10ms polling
+        usleep(10000);
+    }
+
     p->timeSolver = Abc_Clock() - clk;
     if (p->vLevel > 0) Abc_PrintTime(1, "Solver runtime", p->timeSolver);
-    if (ret == 31744) {
-        printf("[Minr] Solver timed out (%.1f sec limit).\n", timeoutSec);
+
+    if (timedOut) {
+        printf("[Minr] Solver timed out (%.1f sec CPU limit).\n", timeoutSec);
         p->solverStatus = 4;
         return NULL;
     }
-    if (ret != 7680) printf("[Minr] Solver check: exit code %d\n", ret);
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 30) {
+        // old code expected 7680 from system(); now we see raw exit code.
+        if (p->vLevel > 0) printf("[Minr] Solver exit code %d\n", WEXITSTATUS(status));
+    }
 
     FILE * pFile = fopen(LogFile, "r");
     if (pFile == NULL) {

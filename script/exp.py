@@ -4,7 +4,6 @@ import csv
 import re
 from datetime import datetime
 import sys
-import statistics
 
 # ==========================================
 # 實驗參數設定區
@@ -48,26 +47,26 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # benchmarks/itc99 內所有 .aig（已展開列舉）
 BENCHMARKS = [
     "itc99/b01.aig",
-    "itc99/b02.aig",
-    "itc99/b03.aig",
-    "itc99/b04.aig",
-    "itc99/b05.aig",
-    "itc99/b06.aig",
-    "itc99/b07.aig",
-    "itc99/b08.aig",
-    "itc99/b09.aig",
-    "itc99/b10.aig",
-    "itc99/b11.aig",
-    "itc99/b12.aig",
-    "itc99/b13.aig",
-    "itc99/b14.aig",
-    "itc99/b15.aig",
-    "itc99/b17.aig",
-    "itc99/b18.aig",
-    "itc99/b19.aig",
-    "itc99/b20.aig",
-    "itc99/b21.aig",
-    "itc99/b22.aig",
+    # "itc99/b02.aig",
+    # "itc99/b03.aig",
+    # "itc99/b04.aig",
+    # "itc99/b05.aig",
+    # "itc99/b06.aig",
+    # "itc99/b07.aig",
+    # "itc99/b08.aig",
+    # "itc99/b09.aig",
+    # "itc99/b10.aig",
+    # "itc99/b11.aig",
+    # "itc99/b12.aig",
+    # "itc99/b13.aig",
+    # "itc99/b14.aig",
+    # "itc99/b15.aig",
+    # "itc99/b17.aig",
+    # "itc99/b18.aig",
+    # "itc99/b19.aig",
+    # "itc99/b20.aig",
+    # "itc99/b21.aig",
+    # "itc99/b22.aig",
 ]
 
 BENCHMARK_DIR = os.path.join(ROOT_DIR, "benchmarks")
@@ -153,7 +152,7 @@ def main():
     def build_csv_path(prefix: str):
         now = datetime.now()
         date_str = now.strftime("%m%d")
-        time_str = now.strftime("%H%M")
+        time_str = now.strftime("%H%M%S")
         parts = []
         parts.append(f"S{min(SEEDS)}-{max(SEEDS)}")
         parts.append(f"DC{min(DC_RATIO)}-{max(DC_RATIO)}")
@@ -215,8 +214,6 @@ def main():
         "sim_reg_mismatch_strong",
     ]
 
-    stats = {}
-
     def _to_float_percent(s: str):
         if not s:
             return None
@@ -241,23 +238,6 @@ def main():
             return float(s)
         except Exception:
             return None
-
-    def _mean_std(vals):
-        vals = [v for v in vals if v is not None]
-        if not vals:
-            return None, None
-        if len(vals) == 1:
-            return float(vals[0]), None
-        return float(statistics.mean(vals)), float(statistics.stdev(vals))
-
-    def _fmt_pct(x):
-        return "NA" if x is None else f"{x:.2f}%"
-
-    def _fmt_num(x, nd=3):
-        return "NA" if x is None else f"{x:.{nd}f}"
-
-    def _fmt_int(x):
-        return "NA" if x is None else str(int(x))
 
     with open(detail_csv, "w", newline="", encoding="utf-8") as detail_f:
         detail_writer = csv.DictWriter(detail_f, fieldnames=headers)
@@ -347,122 +327,11 @@ def main():
                         detail_writer.writerow(out)
                         detail_f.flush()
                         os.fsync(detail_f.fileno())
-
-                        # update stats
-                        specified = _to_int(parsed.get("specified_regs", ""))
-                        k0_ratio = _to_float_percent(parsed.get("k0_reset_ratio", ""))
-                        best_k = _to_int(parsed.get("best_k", ""))
-                        reset_ratio = _to_float_percent(parsed.get("reset_ratio", ""))
-                        reset_ratio_before = _to_float_percent(parsed.get("reset_ratio_before_refine", ""))
-                        runtime = _to_float(parsed.get("runtime_sec", ""))
-                        refine_sec = _to_float(parsed.get("refine_sec", ""))
-
-                        st = stats.setdefault(stem, {"info": {}, "by_dc": {}, "attempts": {}})
-                        st["attempts"][dc_pct] = st["attempts"].get(dc_pct, 0) + 1
-
-                        # valid run definition: must have reset_ratio and runtime
-                        if reset_ratio is not None and runtime is not None:
-                            entry = {
-                                "specified": specified,
-                                "k0_reset_ratio": k0_ratio if OPTIMIZE_MODE else None,
-                                "best_k": best_k if OPTIMIZE_MODE else None,
-                                "reset_ratio": reset_ratio,
-                                "reset_ratio_before_refine": reset_ratio_before,
-                                "runtime": runtime,
-                                "refine_sec": refine_sec,
-                            }
-                            if not st["info"]:
-                                st["info"] = {
-                                    "ff": parsed.get("ff", ""),
-                                    "nodes": parsed.get("nodes", ""),
-                                }
-                            st["by_dc"].setdefault(dc_pct, []).append(entry)
         except KeyboardInterrupt:
             print(f"\n[Interrupt] Stopped by user. Partial detail saved to {detail_csv}")
 
-    # stat csv column order (as requested)
-    stat_headers = ["circuit", "ff", "nodes"]
-    for dc_pct in DC_RATIO:
-        stat_headers += [
-            f"D{dc_pct}_specified_avg",
-            f"D{dc_pct}_specified_std",
-            f"D{dc_pct}_k0_reset_ratio_avg",
-            f"D{dc_pct}_k0_reset_ratio_std",
-            f"D{dc_pct}_best_k_avg",
-            f"D{dc_pct}_best_k_std",
-            f"D{dc_pct}_reset_ratio_avg",
-            f"D{dc_pct}_reset_ratio_std",
-            f"D{dc_pct}_reset_ratio_before_refine_avg",
-            f"D{dc_pct}_reset_ratio_before_refine_std",
-            f"D{dc_pct}_runtime_sec_avg",
-            f"D{dc_pct}_runtime_sec_std",
-            f"D{dc_pct}_refine_sec_avg",
-            f"D{dc_pct}_refine_sec_std",
-            f"D{dc_pct}_invalid_runs",
-        ]
-
-    stat_rows = []
-    for stem in sorted(stats.keys()):
-        st = stats[stem]
-        row = {h: "" for h in stat_headers}
-        row["circuit"] = stem
-        row["ff"] = st["info"].get("ff", "")
-        row["nodes"] = st["info"].get("nodes", "")
-
-        for dc_pct in DC_RATIO:
-            entries = st["by_dc"].get(dc_pct, [])
-            attempts = st.get("attempts", {}).get(dc_pct, 0)
-            invalid = attempts - len(entries)
-            if attempts:
-                row[f"D{dc_pct}_invalid_runs"] = str(invalid)
-            if not entries:
-                continue
-
-            specifieds = [e.get("specified") for e in entries]
-            k0s = [e.get("k0_reset_ratio") for e in entries]
-            bks = [e.get("best_k") for e in entries]
-            rrs = [e.get("reset_ratio") for e in entries]
-            rrbs = [e.get("reset_ratio_before_refine") for e in entries]
-            runtimes = [e.get("runtime") for e in entries]
-            refsecs = [e.get("refine_sec") for e in entries]
-
-            m, s = _mean_std(specifieds)
-            row[f"D{dc_pct}_specified_avg"] = _fmt_num(m, nd=3) if m is not None else "NA"
-            row[f"D{dc_pct}_specified_std"] = _fmt_num(s, nd=3) if s is not None else "NA"
-
-            m, s = _mean_std(k0s)
-            row[f"D{dc_pct}_k0_reset_ratio_avg"] = _fmt_pct(m)
-            row[f"D{dc_pct}_k0_reset_ratio_std"] = _fmt_pct(s)
-
-            m, s = _mean_std(bks)
-            row[f"D{dc_pct}_best_k_avg"] = _fmt_num(m, nd=3) if m is not None else "NA"
-            row[f"D{dc_pct}_best_k_std"] = _fmt_num(s, nd=3) if s is not None else "NA"
-
-            m, s = _mean_std(rrs)
-            row[f"D{dc_pct}_reset_ratio_avg"] = _fmt_pct(m)
-            row[f"D{dc_pct}_reset_ratio_std"] = _fmt_pct(s)
-
-            m, s = _mean_std(rrbs)
-            row[f"D{dc_pct}_reset_ratio_before_refine_avg"] = _fmt_pct(m)
-            row[f"D{dc_pct}_reset_ratio_before_refine_std"] = _fmt_pct(s)
-
-            m, s = _mean_std(runtimes)
-            row[f"D{dc_pct}_runtime_sec_avg"] = _fmt_num(m, nd=3)
-            row[f"D{dc_pct}_runtime_sec_std"] = _fmt_num(s, nd=3)
-
-            m, s = _mean_std(refsecs)
-            row[f"D{dc_pct}_refine_sec_avg"] = _fmt_num(m, nd=3)
-            row[f"D{dc_pct}_refine_sec_std"] = _fmt_num(s, nd=3)
-
-        stat_rows.append(row)
-
-    with open(stat_csv, "w", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=stat_headers)
-        writer.writeheader()
-        writer.writerows(stat_rows)
-
     print(f"\nAll tasks finished. Detail saved to {detail_csv}")
-    print(f"All tasks finished. Stat saved to {stat_csv}")
+    print("All tasks finished. (No stat generated; use script/stat.py)")
 
 
 if __name__ == "__main__":
