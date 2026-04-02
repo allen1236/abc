@@ -12,41 +12,8 @@ import sys
 # 專案根目錄（script/exp.py → repo root）
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# benchmarks/iscas89 內所有 .aig（已展開列舉）
-# BENCHMARKS = [
-#     "iscas89/s1196.aig",
-#     "iscas89/s1238.aig",
-#     "iscas89/s13207.aig",
-#     "iscas89/s1423.aig",
-#     "iscas89/s1488.aig",
-#     "iscas89/s15850.aig",
-#     "iscas89/s27.aig",
-#     "iscas89/s298.aig",
-#     "iscas89/s344.aig",
-#     "iscas89/s349.aig",
-#     "iscas89/s35932.aig",
-#     "iscas89/s382.aig",
-#     "iscas89/s38417.aig",
-#     "iscas89/s38584.aig",
-#     "iscas89/s400.aig",
-#     "iscas89/s420.aig",
-#     "iscas89/s444.aig",
-#     "iscas89/s510.aig",
-#     "iscas89/s526.aig",
-#     "iscas89/s5378.aig",
-#     "iscas89/s641.aig",
-#     "iscas89/s713.aig",
-#     "iscas89/s820.aig",
-#     "iscas89/s832.aig",
-#     "iscas89/s838.aig",
-#     "iscas89/s9234.aig",
-#     "iscas89/s953.aig",
-#     "iscas89/s967.aig",
-# ]
-
-# benchmarks/itc99 內所有 .aig（已展開列舉）
 BENCHMARKS = [
-    "itc99/b01.aig",
+    # "itc99/b01.aig",
     # "itc99/b02.aig",
     # "itc99/b03.aig",
     # "itc99/b04.aig",
@@ -60,13 +27,40 @@ BENCHMARKS = [
     # "itc99/b12.aig",
     # "itc99/b13.aig",
     # "itc99/b14.aig",
-    # "itc99/b15.aig",
-    # "itc99/b17.aig",
-    # "itc99/b18.aig",
-    # "itc99/b19.aig",
-    # "itc99/b20.aig",
-    # "itc99/b21.aig",
-    # "itc99/b22.aig",
+    "itc99/b15.aig",
+    "itc99/b17.aig",
+    "itc99/b18.aig",
+    "itc99/b19.aig",
+    "itc99/b20.aig",
+    "itc99/b21.aig",
+    "itc99/b22.aig",
+#     "iscas89/s1196.aig",
+#     "iscas89/s1238.aig",
+#     "iscas89/s13207.aig",
+#     "iscas89/s1423.aig",
+#     "iscas89/s1488.aig",
+#     "iscas89/s15850.aig",
+#     "iscas89/s27.aig",
+#     "iscas89/s298.aig",
+#     "iscas89/s344.aig",
+#     "iscas89/s349.aig",
+#     "iscas89/s35932.aig",
+#     "iscas89/s382.aig",
+#     "iscas89/s38417.aig",
+    "iscas89/s38584.aig",
+#     "iscas89/s400.aig",
+#     "iscas89/s420.aig",
+#     "iscas89/s444.aig",
+#     "iscas89/s510.aig",
+#     "iscas89/s526.aig",
+#     "iscas89/s5378.aig",
+#     "iscas89/s641.aig",
+#     "iscas89/s713.aig",
+#     "iscas89/s820.aig",
+#     "iscas89/s832.aig",
+#     "iscas89/s838.aig",
+#     "iscas89/s9234.aig",
+#     "iscas89/s953.aig",
 ]
 
 BENCHMARK_DIR = os.path.join(ROOT_DIR, "benchmarks")
@@ -75,7 +69,7 @@ LOG_DIR = os.path.join(SCRIPT_DIR, "log")
 EXP_DIR = os.path.join(SCRIPT_DIR, "exp")
 
 ABC_BINARY = os.path.join(ROOT_DIR, "abc")
-TIMEOUT_SEC = 1000  # Python subprocess 層的 Timeout（秒）
+TIMEOUT_SEC = 1200  # Python subprocess 層的 Timeout（秒）
 
 # parameters
 K = 1
@@ -87,7 +81,7 @@ REFINE_CONF_LIMIT = 10000  # -c <nConf>: SAT refine conflict limit (0=unlimited)
 REFINE_CORE_ONLY = False  # -C: core-only refine (skip trial release)
 OTHER_ARGS = ""  # 預留給其他字串參數
 OPTIMIZE_MODE = 1  # 0=fix -k, 1=-O 1 (sweep k), 2=-O 2 (outer-loop)
-DC_RATIO = [0, 25, 50, 75]  # -D: 設定 target state 中 don't care 比例 (1-99), 0=不使用
+DC_RATIO = [50]  # -D: 設定 target state 中 don't care 比例 (1-99), 0=不使用
 TOTAL_TIMEOUT = 600  # -t: 傳給 &minr 的總時間預算 (秒), 0=不限
 
 
