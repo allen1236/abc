@@ -1,6 +1,10 @@
 """
 依 k 掃描結果匯出 CSV（搭配 &minr -O 1 -K N）：每個 k 一組 reset / reduction / runtime_sec。
 
+reduction 與 minr report [result] 的 reduction 定義相同（非總 ff）：
+  100 * (1 - required_reset / specified_regs)
+其中 specified_regs = target 裡指定為 0/1 的暫存器個數（與 exp.py 用的 specified 欄相同）。
+
 檔名前綴預設 k_（非 exp_）。需已建置支援 -K 的 abc。
 """
 
@@ -14,6 +18,7 @@ from datetime import datetime
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BENCHMARKS = [
+    "iscas89/s1423.aig",
     "iscas89/s5378.aig",
     "iscas89/s9234.aig",
     "iscas89/s15850.aig",
@@ -28,7 +33,7 @@ ABC_BINARY = os.path.join(ROOT_DIR, "abc")
 TIMEOUT_SEC = 1200
 
 K_MAX = 8  # 傳給 &minr 的 -K：掃描 k=0..K_MAX（含）
-SEEDS = [5, 6, 7, 8, 9]
+SEEDS = [0]
 RANDOM_SIM_CYCLE = 100
 REFINE_MODE = 1
 REFINE_BIND_DC = True
@@ -36,30 +41,46 @@ REFINE_CONF_LIMIT = 10000
 REFINE_CORE_ONLY = False
 OTHER_ARGS = ""
 OPTIMIZE_MODE = 1
-DC_RATIO = [0, 25, 50, 75]
+DC_RATIO = [0,50]
 TOTAL_TIMEOUT = 600
 
 
+def _to_int(s):
+    if s is None:
+        return None
+    s = str(s).strip()
+    if not s or s.upper() in ("NA", "N/A"):
+        return None
+    try:
+        return int(float(s))
+    except ValueError:
+        return None
+
+
+def reduction_from_reset_and_specified(reset_str: str, specified_str: str) -> str:
+    """與 minr [result] reduction 相同：100 * (1 - required_reset / specified_regs)。"""
+    r = _to_int(reset_str)
+    s = _to_int(specified_str)
+    if r is None or s is None or s <= 0:
+        return "NA"
+    pct = 100.0 * (1.0 - float(r) / float(s))
+    return f"{pct:.2f}%"
+
+
 def parse_iterations_block(content: str):
-    """Parse [iterations] lines into { k: {reset, reduction, runtime_sec} }."""
+    """Parse [iterations] lines into { k: {reset, runtime_sec} }（reset = 該 k 的 required_reset）。"""
     out = {}
     sec = re.search(r"\[iterations\]\s*\n(.*?)(?:\n\[|\Z)", content, re.S)
     if not sec:
         return out
     block = sec.group(1)
-    # New format: k=1, resets=3, reduction=40.00%, 2ms
+    # New format: k=1, resets=3, reduction=40.00%, 2ms（reduction 改由 Python 依 reset/specified 重算）
     for m in re.finditer(
         r"^k=(\d+),\s*resets=(\d+),\s*reduction=(N/A|[\d.]+%),\s*(\d+)ms\s*$", block, re.M
     ):
         k = int(m.group(1))
-        red_raw = m.group(3).strip()
-        if red_raw == "N/A":
-            red = "NA"
-        else:
-            red = red_raw.rstrip("%").strip()
         out[k] = {
             "reset": m.group(2),
-            "reduction": red,
             "runtime_sec": f"{int(m.group(4)) / 1000.0:.6f}",
         }
     # Legacy: k=1, resets=3, 2ms
@@ -69,7 +90,6 @@ def parse_iterations_block(content: str):
             continue
         out[k] = {
             "reset": m.group(2),
-            "reduction": "NA",
             "runtime_sec": f"{int(m.group(3)) / 1000.0:.6f}",
         }
     # Failure: k=1, unsat, reduction=N/A, 2ms
@@ -77,13 +97,13 @@ def parse_iterations_block(content: str):
         r"^k=(\d+),\s*(?:unsat|timeout|error),\s*reduction=N/A,\s*(\d+)ms\s*$", block, re.M
     ):
         k = int(m.group(1))
-        out[k] = {"reset": "NA", "reduction": "NA", "runtime_sec": f"{int(m.group(2)) / 1000.0:.6f}"}
+        out[k] = {"reset": "NA", "runtime_sec": f"{int(m.group(2)) / 1000.0:.6f}"}
     # Legacy fail: k=1, unsat, 2ms
     for m in re.finditer(r"^k=(\d+),\s*(unsat|timeout|error),\s*(\d+)ms\s*$", block, re.M):
         k = int(m.group(1))
         if k in out:
             continue
-        out[k] = {"reset": "NA", "reduction": "NA", "runtime_sec": f"{int(m.group(3)) / 1000.0:.6f}"}
+        out[k] = {"reset": "NA", "runtime_sec": f"{int(m.group(3)) / 1000.0:.6f}"}
     return out
 
 
@@ -222,12 +242,13 @@ def main():
                         for kk in range(0, K_MAX + 1):
                             if kk in by_k:
                                 row[f"k{kk}_reset"] = by_k[kk]["reset"]
-                                row[f"k{kk}_reduction"] = by_k[kk]["reduction"]
                                 row[f"k{kk}_runtime_sec"] = by_k[kk]["runtime_sec"]
                             else:
                                 row[f"k{kk}_reset"] = "NA"
-                                row[f"k{kk}_reduction"] = "NA"
                                 row[f"k{kk}_runtime_sec"] = "NA"
+                            row[f"k{kk}_reduction"] = reduction_from_reset_and_specified(
+                                row[f"k{kk}_reset"], row["specified"]
+                            )
 
                         detail_writer.writerow(row)
                         detail_f.flush()
