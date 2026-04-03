@@ -13,11 +13,11 @@ import sys
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BENCHMARKS = [
-    "itc99/b01.aig",
-    "itc99/b02.aig",
-    "itc99/b03.aig",
-    "itc99/b04.aig",
-    "itc99/b05.aig",
+    # "itc99/b01.aig",
+    # "itc99/b02.aig",
+    # "itc99/b03.aig",
+    # "itc99/b04.aig",
+    # "itc99/b05.aig",
     # "itc99/b06.aig",
     # "itc99/b07.aig",
     # "itc99/b08.aig",

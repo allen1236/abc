@@ -7,6 +7,15 @@
 
 環境變數:
   MINR_EXP_WORKERS  預設並行數（預設 8）；若命令列有給第二個數字則覆寫。
+
+終端機狀態標籤（每個 job 結束時）:
+  [ok]      abc 正常結束，且 log 裡至少解析到一個欄位（patterns 有命中）
+  [fail]    abc 非零結束、沒有 log、或 log 完全對不上 patterns（parsed 為空）
+  [timeout] Python subprocess 超過 TIMEOUT_SEC
+
+進度列: [start active=N] = 目前有 N 個 job 在跑；[finish D/T active=A] = 已完成 D/T，剩餘並行中 A 個。
+
+Ctrl+C: 終止所有已啟動的 abc 子程序、取消尚未執行的 job，並結束程式（exit 130）；已寫入 CSV 的列會保留。
 """
 
 import os
@@ -15,8 +24,11 @@ import csv
 import sys
 import subprocess
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
 from datetime import datetime
+
+# subprocess: ThreadPoolExecutor.shutdown(cancel_futures=...) needs 3.9+
+_PY39 = sys.version_info >= (3, 9)
 
 # ==========================================
 # 實驗參數設定區（與 exp.py 對齊；benchmark 僅留較小電路方便試跑）
@@ -25,47 +37,47 @@ from datetime import datetime
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BENCHMARKS = [
-    "itc99/b01.aig",
-    "itc99/b02.aig",
-    "itc99/b03.aig",
-    "itc99/b04.aig",
-    "itc99/b05.aig",
-    "itc99/b06.aig",
-    "itc99/b07.aig",
-    "itc99/b08.aig",
-    "itc99/b09.aig",
-    "itc99/b10.aig",
-    "itc99/b11.aig",
-    "itc99/b12.aig",
-    "itc99/b13.aig",
-    "itc99/b14.aig",
-    "iscas89/s1196.aig",
-    "iscas89/s1238.aig",
-    "iscas89/s13207.aig",
-    "iscas89/s1423.aig",
-    "iscas89/s1488.aig",
-    "iscas89/s15850.aig",
-    "iscas89/s27.aig",
-    "iscas89/s298.aig",
-    "iscas89/s344.aig",
-    "iscas89/s349.aig",
-    "iscas89/s35932.aig",
-    "iscas89/s382.aig",
-    "iscas89/s38417.aig",
-    "iscas89/s400.aig",
-    "iscas89/s420.aig",
-    "iscas89/s444.aig",
-    "iscas89/s510.aig",
-    "iscas89/s526.aig",
-    "iscas89/s5378.aig",
-    "iscas89/s641.aig",
-    "iscas89/s713.aig",
-    "iscas89/s820.aig",
-    "iscas89/s832.aig",
-    "iscas89/s838.aig",
-    "iscas89/s9234.aig",
-    "iscas89/s953.aig",
-    "iscas89/s38584.aig",
+    # "itc99/b01.aig",
+    # "itc99/b02.aig",
+    # "itc99/b03.aig",
+    # "itc99/b04.aig",
+    # "itc99/b05.aig",
+    # "itc99/b06.aig",
+    # "itc99/b07.aig",
+    # "itc99/b08.aig",
+    # "itc99/b09.aig",
+    # "itc99/b10.aig",
+    # "itc99/b11.aig",
+    # "itc99/b12.aig",
+    # "itc99/b13.aig",
+    # "itc99/b14.aig",
+    # "iscas89/s1196.aig",
+    # "iscas89/s1238.aig",
+    # "iscas89/s13207.aig",
+    # "iscas89/s1423.aig",
+    # "iscas89/s1488.aig",
+    # "iscas89/s15850.aig",
+    # "iscas89/s27.aig",
+    # "iscas89/s298.aig",
+    # "iscas89/s344.aig",
+    # "iscas89/s349.aig",
+    # "iscas89/s35932.aig",
+    # "iscas89/s382.aig",
+    # "iscas89/s38417.aig",
+    # "iscas89/s400.aig",
+    # "iscas89/s420.aig",
+    # "iscas89/s444.aig",
+    # "iscas89/s510.aig",
+    # "iscas89/s526.aig",
+    # "iscas89/s5378.aig",
+    # "iscas89/s641.aig",
+    # "iscas89/s713.aig",
+    # "iscas89/s820.aig",
+    # "iscas89/s832.aig",
+    # "iscas89/s838.aig",
+    # "iscas89/s9234.aig",
+    # "iscas89/s953.aig",
+    # "iscas89/s38584.aig",
     "itc99/b15.aig",
     "itc99/b17.aig",
     "itc99/b18.aig",
@@ -81,10 +93,11 @@ LOG_DIR = os.path.join(SCRIPT_DIR, "log")
 EXP_DIR = os.path.join(SCRIPT_DIR, "exp")
 
 ABC_BINARY = os.path.join(ROOT_DIR, "abc")
-TIMEOUT_SEC = 2000
+TIMEOUT_SEC = 1200
 
 K = 1
-SEEDS = [5, 6, 7, 8, 9]
+SEEDS = [0, 1, 2, 3, 4]
+# SEEDS = [5, 6, 7, 8, 9]
 RANDOM_SIM_CYCLE = 100
 REFINE_MODE = 1
 REFINE_BIND_DC = True
@@ -92,7 +105,8 @@ REFINE_CONF_LIMIT = 10000
 REFINE_CORE_ONLY = False
 OTHER_ARGS = ""
 OPTIMIZE_MODE = 1
-DC_RATIO = [0, 25, 50, 75]
+DC_RATIO = [0, 25, 75]
+# DC_RATIO = [0, 25, 50, 75]
 TOTAL_TIMEOUT = 600
 
 # 預設 8；可用 MINR_EXP_WORKERS 或命令列第二參數覆寫
@@ -100,7 +114,7 @@ def _default_max_workers() -> int:
     w = os.environ.get("MINR_EXP_WORKERS", "").strip()
     if w.isdigit():
         return max(1, int(w))
-    return 8
+    return 24
 
 
 MAX_WORKERS = _default_max_workers()
@@ -231,8 +245,48 @@ def main():
         "sim_reg_mismatch_strong",
     ]
 
+    jobs = [(b, s, d) for b in BENCHMARKS for s in SEEDS for d in DC_RATIO]
+    n_jobs = len(jobs)
+    progress_lock = threading.Lock()
+    run_state = {"active": 0, "done": 0}
+    child_procs_lock = threading.Lock()
+    child_procs = []
+
+    def terminate_all_abc_children():
+        """終止所有由本程式啟動、仍在跑的 abc（含 shell 子程序）。"""
+        with child_procs_lock:
+            snap = list(child_procs)
+        for p in snap:
+            try:
+                if p.poll() is None:
+                    p.terminate()
+            except Exception:
+                pass
+        # 給 SIGTERM 一點時間，再補 SIGKILL
+        try:
+            import time
+
+            time.sleep(0.2)
+        except Exception:
+            pass
+        with child_procs_lock:
+            snap = list(child_procs)
+        for p in snap:
+            try:
+                if p.poll() is None:
+                    p.kill()
+            except Exception:
+                pass
+
     def run_one_job(bench: str, seed: int, dc_pct: int) -> dict:
         stem = bench_stem(bench)
+        with progress_lock:
+            run_state["active"] += 1
+            print(
+                f"[start active={run_state['active']}] {stem} r={seed} D={dc_pct}",
+                flush=True,
+            )
+
         src_aig = os.path.join(BENCHMARK_DIR, bench)
 
         log_suffix = build_log_suffix(seed, dc_pct)
@@ -257,58 +311,91 @@ def main():
                 f'&minr -k {K} -r {seed} -R {RANDOM_SIM_CYCLE} {dc_arg} {refine_arg}{bind_arg}{conf_arg}{core_only_arg} {timeout_arg} {OTHER_ARGS} -o {log_path}"'
             )
 
-        parsed = {}
-        is_timeout = False
-
+        status = "fail"
         try:
-            subprocess.run(abc_cmd, shell=True, timeout=TIMEOUT_SEC, check=True, capture_output=True)
-        except subprocess.TimeoutExpired:
-            is_timeout = True
-        except subprocess.CalledProcessError:
-            pass
+            parsed = {}
+            is_timeout = False
 
-        if not is_timeout and os.path.exists(log_path):
-            with open(log_path, "r", encoding="utf-8") as f:
-                content = f.read()
-                for key, pattern in patterns.items():
-                    match = re.search(pattern, content)
-                    if match:
-                        parsed[key] = match.group(1)
+            proc = subprocess.Popen(
+                abc_cmd,
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            with child_procs_lock:
+                child_procs.append(proc)
+            try:
+                try:
+                    proc.wait(timeout=TIMEOUT_SEC)
+                except subprocess.TimeoutExpired:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    try:
+                        proc.wait(timeout=5)
+                    except Exception:
+                        pass
+                    is_timeout = True
+                else:
+                    if proc.returncode != 0:
+                        pass  # 與原 subprocess.run(..., check=True) 失敗時相同，不擲出
+            finally:
+                with child_procs_lock:
+                    try:
+                        child_procs.remove(proc)
+                    except ValueError:
+                        pass
 
-        out = {h: "NA" for h in headers}
-        out["circuit"] = stem
-        out["dc_ratio"] = str(dc_pct)
-        out["seed"] = str(seed)
-        out["nodes"] = parsed.get("nodes", "NA")
-        out["ff"] = parsed.get("ff", "NA")
-        out["specified"] = parsed.get("specified_regs", "NA")
-        out["k0_reset_ratio"] = parsed.get("k0_reset_ratio", "NA") if OPTIMIZE_MODE else "NA"
-        out["refine_mode"] = parsed.get("refine_mode", "NA")
-        out["best_k"] = parsed.get("best_k", "NA") if OPTIMIZE_MODE else "NA"
-        out["required_reset"] = parsed.get("required_reset", "NA")
-        out["reset_ratio"] = parsed.get("reset_ratio", "NA")
-        out["runtime_sec"] = parsed.get("runtime_sec", "NA")
-        out["opt_status"] = parsed.get("opt_status", "NA") if OPTIMIZE_MODE else "NA"
-        out["cut_verified"] = parsed.get("cut_verified", "NA")
-        out["cec_verified"] = parsed.get("cec_verified", "NA")
-        out["reset_ratio_before_refine"] = parsed.get("reset_ratio_before_refine", "NA")
-        out["refine_by_trial"] = parsed.get("refine_by_trial", "NA")
-        out["refine_by_core"] = parsed.get("refine_by_core", "NA")
-        out["refine_sec"] = parsed.get("refine_sec", "NA")
-        out["spec_ro_in_cut"] = parsed.get("spec_ro_in_cut", "NA")
-        out["sim_reg_mismatch_weak"] = parsed.get("sim_reg_mismatch_weak", "NA")
-        out["sim_reg_mismatch_strong"] = parsed.get("sim_reg_mismatch_strong", "NA")
+            if not is_timeout and os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                    for key, pattern in patterns.items():
+                        match = re.search(pattern, content)
+                        if match:
+                            parsed[key] = match.group(1)
 
-        status = "timeout" if is_timeout else ("ok" if parsed else "fail")
-        print(f"[{status}] {stem} r={seed} D={dc_pct}", flush=True)
-        return out
+            out = {h: "NA" for h in headers}
+            out["circuit"] = stem
+            out["dc_ratio"] = str(dc_pct)
+            out["seed"] = str(seed)
+            out["nodes"] = parsed.get("nodes", "NA")
+            out["ff"] = parsed.get("ff", "NA")
+            out["specified"] = parsed.get("specified_regs", "NA")
+            out["k0_reset_ratio"] = parsed.get("k0_reset_ratio", "NA") if OPTIMIZE_MODE else "NA"
+            out["refine_mode"] = parsed.get("refine_mode", "NA")
+            out["best_k"] = parsed.get("best_k", "NA") if OPTIMIZE_MODE else "NA"
+            out["required_reset"] = parsed.get("required_reset", "NA")
+            out["reset_ratio"] = parsed.get("reset_ratio", "NA")
+            out["runtime_sec"] = parsed.get("runtime_sec", "NA")
+            out["opt_status"] = parsed.get("opt_status", "NA") if OPTIMIZE_MODE else "NA"
+            out["cut_verified"] = parsed.get("cut_verified", "NA")
+            out["cec_verified"] = parsed.get("cec_verified", "NA")
+            out["reset_ratio_before_refine"] = parsed.get("reset_ratio_before_refine", "NA")
+            out["refine_by_trial"] = parsed.get("refine_by_trial", "NA")
+            out["refine_by_core"] = parsed.get("refine_by_core", "NA")
+            out["refine_sec"] = parsed.get("refine_sec", "NA")
+            out["spec_ro_in_cut"] = parsed.get("spec_ro_in_cut", "NA")
+            out["sim_reg_mismatch_weak"] = parsed.get("sim_reg_mismatch_weak", "NA")
+            out["sim_reg_mismatch_strong"] = parsed.get("sim_reg_mismatch_strong", "NA")
 
-    jobs = [(b, s, d) for b in BENCHMARKS for s in SEEDS for d in DC_RATIO]
-    n_jobs = len(jobs)
+            status = "timeout" if is_timeout else ("ok" if parsed else "fail")
+            return out
+        finally:
+            with progress_lock:
+                run_state["active"] -= 1
+                run_state["done"] += 1
+                print(
+                    f"[finish {run_state['done']}/{n_jobs} active={run_state['active']}] [{status}] {stem} r={seed} D={dc_pct}",
+                    flush=True,
+                )
+
     print(f"Parallel detail CSV: {detail_csv}")
     print(f"Jobs: {n_jobs}, max_workers: {max_workers}")
 
     write_lock = threading.Lock()
+    interrupted = False
 
     with open(detail_csv, "w", newline="", encoding="utf-8") as detail_f:
         detail_writer = csv.DictWriter(detail_f, fieldnames=headers)
@@ -316,23 +403,37 @@ def main():
         detail_f.flush()
         os.fsync(detail_f.fileno())
 
+        executor = ThreadPoolExecutor(max_workers=max_workers)
         try:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_map = {
-                    executor.submit(run_one_job, b, s, d): (b, s, d) for b, s, d in jobs
-                }
-                for fut in as_completed(future_map):
+            future_map = {
+                executor.submit(run_one_job, b, s, d): (b, s, d) for b, s, d in jobs
+            }
+            for fut in as_completed(future_map):
+                try:
                     row = fut.result()
-                    with write_lock:
-                        detail_writer.writerow(row)
-                        detail_f.flush()
-                        os.fsync(detail_f.fileno())
+                except CancelledError:
+                    continue
+                with write_lock:
+                    detail_writer.writerow(row)
+                    detail_f.flush()
+                    os.fsync(detail_f.fileno())
         except KeyboardInterrupt:
-            print(f"\n[Interrupt] Partial detail saved to {detail_csv}")
-            raise
+            interrupted = True
+            print("\n[Interrupt] 正在停止所有 abc 子程序與未開始的 job …", flush=True)
+            terminate_all_abc_children()
+            if _PY39:
+                executor.shutdown(wait=False, cancel_futures=True)
+            else:
+                executor.shutdown(wait=False)
+            print(f"[Interrupt] 已中止。已寫入的列仍保留於 {detail_csv}", flush=True)
+            sys.exit(130)
+        finally:
+            if not interrupted:
+                executor.shutdown(wait=True)
 
-    print(f"\nAll tasks finished. Detail saved to {detail_csv}")
-    print("All tasks finished. (No stat generated; use script/stat.py)")
+    if not interrupted:
+        print(f"\nAll tasks finished. Detail saved to {detail_csv}")
+        print("All tasks finished. (No stat generated; use script/stat.py)")
 
 
 if __name__ == "__main__":
