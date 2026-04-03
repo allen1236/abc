@@ -1318,23 +1318,27 @@ static void Minr_DumpReport(Minr_Man_t * p)
     // --- [iterations] --- (-O 1 only)
     if (p->nOptimizeMode == 1 && p->vOptIterK && Vec_IntSize(p->vOptIterK) > 0) {
         fprintf(pFile, "\n[iterations]\n");
-        fprintf(pFile, "# k, result, time_ms\n");
+        fprintf(pFile, "# k, resets, reduction, time_ms\n");
         int itr;
         for (itr = 0; itr < Vec_IntSize(p->vOptIterK); itr++) {
             int iterK      = Vec_IntEntry(p->vOptIterK, itr);
             int iterResets  = Vec_IntEntry(p->vOptIterResets, itr);
             int iterStatus  = Vec_IntEntry(p->vOptIterStatus, itr);
             int iterTimeMs  = Vec_IntEntry(p->vOptIterTimeMs, itr);
-            if (iterResets >= 0)
-                fprintf(pFile, "k=%d, resets=%d, %dms\n", iterK, iterResets, iterTimeMs);
-            else {
+            if (iterResets >= 0) {
+                if (nSpecRegs > 0)
+                    fprintf(pFile, "k=%d, resets=%d, reduction=%.2f%%, %dms\n", iterK, iterResets,
+                            100.0 * (1.0 - (double)iterResets / (double)nSpecRegs), iterTimeMs);
+                else
+                    fprintf(pFile, "k=%d, resets=%d, reduction=N/A, %dms\n", iterK, iterResets, iterTimeMs);
+            } else {
                 const char * pTag;
                 switch (iterStatus) {
                     case 2:  pTag = "unsat";   break;
                     case 4:  pTag = "timeout"; break;
                     default: pTag = "error";   break;
                 }
-                fprintf(pFile, "k=%d, %s, %dms\n", iterK, pTag, iterTimeMs);
+                fprintf(pFile, "k=%d, %s, reduction=N/A, %dms\n", iterK, pTag, iterTimeMs);
             }
         }
     }
@@ -1638,7 +1642,7 @@ static int Minr_SolveSingleK(Minr_Man_t * p, double solverTimeout)
 }
 
 /**
- * Minr_SolveOptimize - Optimize mode: sweep k = 0, 1, 2, 4, 8, 16, ...
+ * Minr_SolveOptimize - Optimize mode: sweep k (default 0,1,2,4,8,... or dense 0..N with -K N)
  * with total time budget, best-so-far tracking, and early stop.
  */
 #if !defined(ABC_NAMESPACE)
@@ -1652,8 +1656,26 @@ void Minr_SolveOptimize(Minr_Man_t * p)
         for (int ri = 0; ri < nRegs && p->pInitStr[ri]; ri++)
             if (p->pInitStr[ri] == '0' || p->pInitStr[ri] == '1') nSpecRegs++;
     }
-    int kSchedule[] = {0, 1, 2, 4, 8, 16, 32, 64, 128, 256};
-    int nSchedule = (int)(sizeof(kSchedule) / sizeof(kSchedule[0]));
+    int kScheduleStatic[] = {0, 1, 2, 4, 8, 16, 32, 64, 128, 256};
+    int * kSchedule = NULL;
+    int nSchedule = 0;
+    int fFreeSchedule = 0;
+    if ( p->nOptimizeDenseKMax >= 0 ) {
+        nSchedule = p->nOptimizeDenseKMax + 1;
+        kSchedule = ABC_ALLOC( int, nSchedule );
+        if ( !kSchedule ) {
+            printf( "[Optimize] Out of memory for k schedule. Using geometric k schedule.\n" );
+            kSchedule = kScheduleStatic;
+            nSchedule = (int)(sizeof(kScheduleStatic) / sizeof(kScheduleStatic[0]));
+        } else {
+            fFreeSchedule = 1;
+            for ( int i = 0; i < nSchedule; i++ )
+                kSchedule[i] = i;
+        }
+    } else {
+        kSchedule = kScheduleStatic;
+        nSchedule = (int)(sizeof(kScheduleStatic) / sizeof(kScheduleStatic[0]));
+    }
 
     p->bestK = -1;
     p->bestResetCount = nRegs + 1;
@@ -1668,9 +1690,12 @@ void Minr_SolveOptimize(Minr_Man_t * p)
     p->vOptIterTimeMs  = Vec_IntAlloc(nSchedule);
 
     int prevResetCount = nRegs;  // for early stop comparison
+    int fDenseSweep = (p->nOptimizeDenseKMax >= 0); /* -K: run all k=0..N (or until global timeout) for per-k stats */
 
     printf("\n[Optimize] Starting k-sweep with %s time budget.\n",
            p->totalTimeout > 0 ? "limited" : "unlimited");
+    if (fDenseSweep)
+        printf("[Optimize] Dense sweep (-K): no early exit on 0 resets, UNSAT, or small improvement; stop at k=N or time budget.\n");
 
     for (int si = 0; si < nSchedule; si++) {
         int curK = kSchedule[si];
@@ -1723,28 +1748,34 @@ void Minr_SolveOptimize(Minr_Man_t * p)
                 printf("[Optimize] >> New best: k=%d, resets=%d\n", curK, nResets);
             }
 
-            // Early stop: check improvement vs previous round
-            if (nResets == 0) {
-                printf("[Optimize] Perfect solution (0 resets). Stopping.\n");
-                break;
-            }
-            if (si > 0 && prevResetCount > 0) {
-                double improvement = (double)(prevResetCount - nResets) / prevResetCount;
-                if (improvement < (double)MINR_EARLY_STOP_IMPROVEMENT_RATIO) {
-                    printf("[Optimize] Improvement %.2f%% < threshold %.2f%%. Stopping.\n",
-                           improvement * 100.0, (double)MINR_EARLY_STOP_IMPROVEMENT_RATIO * 100.0);
+            // Early stop: check improvement vs previous round (skipped in dense -K sweep)
+            if (!fDenseSweep) {
+                if (nResets == 0) {
+                    printf("[Optimize] Perfect solution (0 resets). Stopping.\n");
                     break;
                 }
+                if (si > 0 && prevResetCount > 0) {
+                    double improvement = (double)(prevResetCount - nResets) / prevResetCount;
+                    if (improvement < (double)MINR_EARLY_STOP_IMPROVEMENT_RATIO) {
+                        printf("[Optimize] Improvement %.2f%% < threshold %.2f%%. Stopping.\n",
+                               improvement * 100.0, (double)MINR_EARLY_STOP_IMPROVEMENT_RATIO * 100.0);
+                        break;
+                    }
+                }
+            } else if (nResets == 0) {
+                printf("[Optimize] Perfect solution (0 resets); continuing dense sweep.\n");
             }
             prevResetCount = nResets;
         } else {
             printf("[Optimize] k=%d: no solution (status=%d)\n", curK, p->solverStatus);
-            if ((p->solverStatus == 4 || p->solverStatus == 2) && p->bestResetCount <= nRegs) {
+            if (!fDenseSweep && (p->solverStatus == 4 || p->solverStatus == 2) && p->bestResetCount <= nRegs) {
                 p->optStatus = 1;  // timeout_with_best
                 printf("[Optimize] Solver %s. Keeping best-so-far.\n",
                        p->solverStatus == 4 ? "timed out" : "returned UNSAT");
                 break;
             }
+            if (fDenseSweep && (p->solverStatus == 4 || p->solverStatus == 2))
+                printf("[Optimize] Continuing dense sweep (next k).\n");
         }
     }
 
@@ -1764,6 +1795,9 @@ void Minr_SolveOptimize(Minr_Man_t * p)
     } else {
         printf("\n[Optimize] No feasible solution found.\n");
     }
+
+    if ( fFreeSchedule && kSchedule )
+        ABC_FREE( kSchedule );
 }
 
 /**
@@ -2120,7 +2154,7 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
 #if !defined(ABC_NAMESPACE)
 extern "C"
 #endif
-void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, char * pSolver, char * pOutDir, char * pPrefix, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent) {
+void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, char * pSolver, char * pOutDir, char * pPrefix, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax) {
     Minr_Man_t Man;
     Minr_Man_t * p = &Man;
     memset(p, 0, sizeof(Minr_Man_t));
@@ -2144,6 +2178,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     p->nOptimizeMode = nOptimizeMode;
     p->totalTimeout = totalTimeout;
     p->nDontCarePercent = nDontCarePercent;
+    p->nOptimizeDenseKMax = nOptimizeDenseKMax;
 
     // Optional: derive target reset value by random multi-frame simulation (-r)
     // If user didn't explicitly provide -I, pass NULL so random sim starts from random state.
