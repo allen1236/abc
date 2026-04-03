@@ -28,6 +28,9 @@ ABC_NAMESPACE_IMPL_START
 #define MINR_VAL_1 1
 #define MINR_VAL_X 2
 
+// After Abc_Random(1), discard this many Abc_Random(0) per unit of user -r seed (seed 0 = no skip).
+#define MINR_RANDOM_SKIP_MULT 10000u
+
 // Helper macros for Dual-Rail
 static inline int Minr_GetVar(Minr_Man_t * p, int ObjId, int Frame) {
     return Vec_IntEntry(p->vVarMap, ObjId * (p->nFrames + 1) + Frame);
@@ -47,9 +50,23 @@ static inline int Minr_Not(int v) {
     return MINR_VAL_X;
 }
 
-// Random Helper (0 or 1)
-static inline int Minr_RandomBinary( int seed = 0 ) {
-    return (Abc_Random(seed) & 1) ? MINR_VAL_1 : MINR_VAL_0;
+// Reset ABC PRNG and skip (user_seed * MINR_RANDOM_SKIP_MULT) draws; user_seed==0 skips none.
+// Abc_Random's first arg is a reset flag, not a numeric seed — see utilSort.c.
+static void Minr_RandomSeedStreamFromUserSeed( int userSeed )
+{
+    Abc_Random( 1 );
+    if ( userSeed > 0 )
+    {
+        unsigned long long nSkip = (unsigned long long)(unsigned)userSeed * (unsigned long long)MINR_RANDOM_SKIP_MULT;
+        for ( unsigned long long i = 0; i < nSkip; i++ )
+            Abc_Random( 0 );
+    }
+}
+
+// Random bit from current ABC stream (caller must have seeded via Minr_RandomSeedStreamFromUserSeed if needed).
+static inline int Minr_RandomBinary( void )
+{
+    return (Abc_Random( 0 ) & 1) ? MINR_VAL_1 : MINR_VAL_0;
 }
 
 // Forward declaration (used by helpers below)
@@ -69,6 +86,8 @@ static char * Minr_DeriveTargetResetByRandomSim( Gia_Man_t * pGia, char * pRoIni
     Vec_Int_t * vCurrentState = Vec_IntAlloc(nRegs);
     Gia_Obj_t * pObj;
     int iObj, k, t;
+
+    Minr_RandomSeedStreamFromUserSeed( seed );
 
     if ( nFramesToSim == 0 )
     {
@@ -90,7 +109,7 @@ static char * Minr_DeriveTargetResetByRandomSim( Gia_Man_t * pGia, char * pRoIni
             }
             else
             {
-                pTarget[k++] = Minr_RandomBinary(seed) ? '1' : '0';
+                pTarget[k++] = Minr_RandomBinary() ? '1' : '0';
             }
         }
         pTarget[nRegs] = '\0';
@@ -113,7 +132,7 @@ static char * Minr_DeriveTargetResetByRandomSim( Gia_Man_t * pGia, char * pRoIni
         }
         else
         {
-            Val = Minr_RandomBinary(seed) ? MINR_VAL_1 : MINR_VAL_0;
+            Val = Minr_RandomBinary() ? MINR_VAL_1 : MINR_VAL_0;
         }
         Vec_IntPush( vCurrentState, Val );
         Vec_IntWriteEntry( vObjVals, Gia_ObjId(pGia, pObj), Val );
@@ -125,7 +144,7 @@ static char * Minr_DeriveTargetResetByRandomSim( Gia_Man_t * pGia, char * pRoIni
     {
         // Set random PIs for this timeframe
         Gia_ManForEachPi( pGia, pObj, iObj )
-            Vec_IntWriteEntry( vObjVals, Gia_ObjId(pGia, pObj), Minr_RandomBinary(seed) );
+            Vec_IntWriteEntry( vObjVals, Gia_ObjId(pGia, pObj), Minr_RandomBinary() );
 
         // Set ROs from current state
         k = 0;
@@ -2151,7 +2170,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
             // Fisher-Yates shuffle to pick nDC random indices
             int * perm = ABC_ALLOC( int, nRegs );
             for ( int i = 0; i < nRegs; i++ ) perm[i] = i;
-            Abc_Random( p->seed + 7 ); // seed the PRNG with a derived value
+            // RNG already advanced by target derivation above; continue same stream.
             for ( int i = nRegs - 1; i > 0; i-- )
             {
                 int j = Abc_Random(0) % (i + 1);
