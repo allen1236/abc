@@ -59,6 +59,18 @@ def _fmt_num(x, nd=3):
     return "NA" if x is None else f"{x:.{nd}f}"
 
 
+def _required_resets_from_ratio_of_ff(ratio_pct: float, ff: int):
+    """
+    從 reset_ratio / k0_reset_ratio（佔全部 ff 的百分比，log 常為 %.2f）還原「需要 reset 的個數」整數，
+    避免 (pct/100)*ff 的浮點誤差造成 k0_reduction 出現 ±0.01% 一類雜訊。
+    """
+    if ratio_pct is None or ff is None or ff <= 0:
+        return None
+    x = (ratio_pct / 100.0) * float(ff)
+    r = int(round(x))
+    return max(0, min(r, ff))
+
+
 def _read_rows(csv_path: str):
     with open(csv_path, newline="", encoding="utf-8") as f:
         r = csv.DictReader(f)
@@ -113,6 +125,7 @@ def main():
             runtime_sec = _to_float(row.get("runtime_sec"))
             refine_sec = _to_float(row.get("refine_sec"))
             k0_reset_ratio = _to_float_percent(row.get("k0_reset_ratio"))
+            reset_ratio_before_pct = _to_float_percent(row.get("reset_ratio_before_refine"))
             best_k = _to_int(row.get("best_k"))
 
             # reduction (%) = 1 - required_reset / specified
@@ -124,15 +137,26 @@ def main():
             if runtime_sec is None or reduction is None:
                 continue
 
-            # k0 reduction: derive required_reset@k0 from k0_reset_ratio (% of ff)
-            k0_reduction = None
-            if k0_reset_ratio is not None and ff is not None and specified is not None and specified > 0:
-                k0_required = (k0_reset_ratio / 100.0) * float(ff)
-                k0_reduction = 100.0 * (1.0 - (k0_required / float(specified)))
+            # k=0 / refine 前：從佔 ff 的百分比還原整數 required reset 數
+            required_reset_k0 = None
+            if k0_reset_ratio is not None and ff is not None:
+                required_reset_k0 = _required_resets_from_ratio_of_ff(k0_reset_ratio, ff)
 
-            reduction_before = None
-            # if exp includes reset_ratio_before_refine only, we cannot reconstruct reduction_before_refine.
-            # keep it optional for future expansion.
+            required_reset_before_refine = None
+            if reset_ratio_before_pct is not None and ff is not None:
+                required_reset_before_refine = _required_resets_from_ratio_of_ff(
+                    reset_ratio_before_pct, ff
+                )
+
+            k0_reduction = None
+            if required_reset_k0 is not None and specified is not None and specified > 0:
+                k0_reduction = 100.0 * (1.0 - (float(required_reset_k0) / float(specified)))
+
+            reduction_before_refine = None
+            if required_reset_before_refine is not None and specified is not None and specified > 0:
+                reduction_before_refine = 100.0 * (
+                    1.0 - (float(required_reset_before_refine) / float(specified))
+                )
 
             g["entries"].append(
                 {
@@ -140,10 +164,12 @@ def main():
                     "required_reset": required_reset,
                     "reduction": reduction,
                     "k0_reduction": k0_reduction,
+                    "required_reset_k0": required_reset_k0,
+                    "reduction_before_refine": reduction_before_refine,
+                    "required_reset_before_refine": required_reset_before_refine,
                     "best_k": best_k,
                     "runtime_sec": runtime_sec,
                     "refine_sec": refine_sec,
-                    "reduction_before_refine": reduction_before,
                 }
             )
 
@@ -162,6 +188,9 @@ def main():
         # avgs
         "specified_avg",
         "k0_reduction_avg",
+        "required_reset_k0_avg",
+        "reduction_before_refine_avg",
+        "required_reset_before_refine_avg",
         "best_k_avg",
         "reduction_avg",
         "required_reset_avg",
@@ -177,6 +206,9 @@ def main():
         # stds (same order as avgs)
         "specified_std",
         "k0_reduction_std",
+        "required_reset_k0_std",
+        "reduction_before_refine_std",
+        "required_reset_before_refine_std",
         "best_k_std",
         "reduction_std",
         "required_reset_std",
@@ -191,6 +223,9 @@ def main():
 
         specifieds = [e.get("specified") for e in entries]
         k0s = [e.get("k0_reduction") for e in entries]
+        k0_rs = [e.get("required_reset_k0") for e in entries]
+        rbfs = [e.get("reduction_before_refine") for e in entries]
+        br_rs = [e.get("required_reset_before_refine") for e in entries]
         bks = [e.get("best_k") for e in entries]
         reds = [e.get("reduction") for e in entries]
         resets = [e.get("required_reset") for e in entries]
@@ -199,6 +234,9 @@ def main():
 
         m, s = _mean_std(specifieds)
         m_k0, s_k0 = _mean_std(k0s)
+        m_k0r, s_k0r = _mean_std(k0_rs)
+        m_rbf, s_rbf = _mean_std(rbfs)
+        m_brr, s_brr = _mean_std(br_rs)
         m_bk, s_bk = _mean_std(bks)
         m_red, s_red = _mean_std(reds)
         m_rst, s_rst = _mean_std(resets)
@@ -214,6 +252,9 @@ def main():
                 # avgs
                 "specified_avg": _fmt_num(m, nd=3),
                 "k0_reduction_avg": _fmt_pct(m_k0),
+                "required_reset_k0_avg": _fmt_num(m_k0r, nd=3),
+                "reduction_before_refine_avg": _fmt_pct(m_rbf),
+                "required_reset_before_refine_avg": _fmt_num(m_brr, nd=3),
                 "best_k_avg": _fmt_num(m_bk, nd=3),
                 "reduction_avg": _fmt_pct(m_red),
                 "required_reset_avg": _fmt_num(m_rst, nd=3),
@@ -229,6 +270,9 @@ def main():
                 # stds
                 "specified_std": _fmt_num(s, nd=3),
                 "k0_reduction_std": _fmt_pct(s_k0),
+                "required_reset_k0_std": _fmt_num(s_k0r, nd=3),
+                "reduction_before_refine_std": _fmt_pct(s_rbf),
+                "required_reset_before_refine_std": _fmt_num(s_brr, nd=3),
                 "best_k_std": _fmt_num(s_bk, nd=3),
                 "reduction_std": _fmt_pct(s_red),
                 "required_reset_std": _fmt_num(s_rst, nd=3),

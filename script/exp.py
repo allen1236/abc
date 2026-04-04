@@ -39,6 +39,7 @@ BENCHMARKS = [
     # "iscas89/s349.aig",
     # "iscas89/s35932.aig",
     # "iscas89/s382.aig",
+    "iscas89/s386.aig",
     # "iscas89/s38417.aig",
     # "iscas89/s400.aig",
     # "iscas89/s420.aig",
@@ -56,8 +57,8 @@ BENCHMARKS = [
     # "iscas89/s38584.aig",
     # "itc99/b15.aig",
     # "itc99/b17.aig",
-    # "itc99/b18.aig",
-    # "itc99/b19.aig",
+    "itc99/b18.aig",
+    "itc99/b19.aig",
     # "itc99/b20.aig",
     # "itc99/b21.aig",
     # "itc99/b22.aig",
@@ -73,7 +74,7 @@ TIMEOUT_SEC = 1200  # Python subprocess 層的 Timeout（秒）
 
 # parameters
 K = 1
-SEEDS = [5, 6, 7, 8, 9]
+SEEDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 RANDOM_SIM_CYCLE = 100
 REFINE_MODE = 1  # -x <mode>: 0=off, 1=CEC, 2=cut, 3=eq cut
 REFINE_BIND_DC = True  # -X: bind don't-care target ROs (only with -x)

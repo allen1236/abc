@@ -63,6 +63,7 @@ BENCHMARKS = [
     # "iscas89/s349.aig",
     # "iscas89/s35932.aig",
     # "iscas89/s382.aig",
+    "iscas89/s386.aig",
     # "iscas89/s38417.aig",
     # "iscas89/s400.aig",
     # "iscas89/s420.aig",
@@ -78,13 +79,13 @@ BENCHMARKS = [
     # "iscas89/s9234.aig",
     # "iscas89/s953.aig",
     # "iscas89/s38584.aig",
-    "itc99/b15.aig",
-    "itc99/b17.aig",
+    # "itc99/b15.aig",
+    # "itc99/b17.aig",
     "itc99/b18.aig",
     "itc99/b19.aig",
-    "itc99/b20.aig",
-    "itc99/b21.aig",
-    "itc99/b22.aig",
+    # "itc99/b20.aig",
+    # "itc99/b21.aig",
+    # "itc99/b22.aig",
 ]
 
 BENCHMARK_DIR = os.path.join(ROOT_DIR, "benchmarks")
@@ -96,8 +97,7 @@ ABC_BINARY = os.path.join(ROOT_DIR, "abc")
 TIMEOUT_SEC = 1200
 
 K = 1
-SEEDS = [0, 1, 2, 3, 4]
-# SEEDS = [5, 6, 7, 8, 9]
+SEEDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 RANDOM_SIM_CYCLE = 100
 REFINE_MODE = 1
 REFINE_BIND_DC = True
@@ -105,8 +105,7 @@ REFINE_CONF_LIMIT = 10000
 REFINE_CORE_ONLY = False
 OTHER_ARGS = ""
 OPTIMIZE_MODE = 1
-DC_RATIO = [0, 25, 75]
-# DC_RATIO = [0, 25, 50, 75]
+DC_RATIO = [0, 25, 50, 75]
 TOTAL_TIMEOUT = 600
 
 # 預設 8；可用 MINR_EXP_WORKERS 或命令列第二參數覆寫
@@ -114,7 +113,7 @@ def _default_max_workers() -> int:
     w = os.environ.get("MINR_EXP_WORKERS", "").strip()
     if w.isdigit():
         return max(1, int(w))
-    return 24
+    return 40
 
 
 MAX_WORKERS = _default_max_workers()
