@@ -49,7 +49,8 @@ struct Minr_Man_t_
     int         nOptimizeMode;  // -O <mode>: 0=off, 1=sweep k, 2=outer-loop heuristic
     double      totalTimeout;   // Total time budget in seconds (-t)
     int         nDontCarePercent; // -D <1..99>: % of target registers set to don't care
-    int         nOptimizeDenseKMax; // -K N with -O 1: sweep k=0..N consecutively; -1 = geometric 0,1,2,4,...
+    int         nOptimizeDenseKMax; // -K N with -O 1: dense sweep inclusive end; -1 = geometric schedule
+    int         nOptimizeDenseKMin; // with -K: dense sweep start from -k (CLI default 0 if -k omitted)
 
     // Internal State
     Vec_Int_t * vVarMap;    // Mapping: (ObjId, Frame) -> SatVar (Base)
@@ -118,7 +119,7 @@ struct Minr_Man_t_
 
 extern void Minr_ExtractCut( Minr_Man_t * p );
 extern void Minr_ExtractEqCut( Minr_Man_t * p );
-extern void Minr_Solve( Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, char * pSolver, char * pOutDir, char * pPrefix, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax );
+extern void Minr_Solve( Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, char * pSolver, char * pOutDir, char * pPrefix, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin );
 extern void Minr_SolveOptimize( Minr_Man_t * p );
 extern void Minr_SolveOptimize2( Minr_Man_t * p );
 

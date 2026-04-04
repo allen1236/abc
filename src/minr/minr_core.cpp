@@ -1661,7 +1661,11 @@ void Minr_SolveOptimize(Minr_Man_t * p)
     int nSchedule = 0;
     int fFreeSchedule = 0;
     if ( p->nOptimizeDenseKMax >= 0 ) {
-        nSchedule = p->nOptimizeDenseKMax + 1;
+        int kLo = p->nOptimizeDenseKMin;
+        int kHi = p->nOptimizeDenseKMax;
+        if ( kLo < 0 )
+            kLo = 0;
+        nSchedule = kHi - kLo + 1;
         kSchedule = ABC_ALLOC( int, nSchedule );
         if ( !kSchedule ) {
             printf( "[Optimize] Out of memory for k schedule. Using geometric k schedule.\n" );
@@ -1670,7 +1674,7 @@ void Minr_SolveOptimize(Minr_Man_t * p)
         } else {
             fFreeSchedule = 1;
             for ( int i = 0; i < nSchedule; i++ )
-                kSchedule[i] = i;
+                kSchedule[i] = kLo + i;
         }
     } else {
         kSchedule = kScheduleStatic;
@@ -1695,7 +1699,8 @@ void Minr_SolveOptimize(Minr_Man_t * p)
     printf("\n[Optimize] Starting k-sweep with %s time budget.\n",
            p->totalTimeout > 0 ? "limited" : "unlimited");
     if (fDenseSweep)
-        printf("[Optimize] Dense sweep (-K): no early exit on 0 resets, UNSAT, or small improvement; stop at k=N or time budget.\n");
+        printf("[Optimize] Dense sweep (-k .. -K): k=%d..%d; no early exit on 0 resets, UNSAT, or small improvement; stop at last k or time budget.\n",
+               p->nOptimizeDenseKMin, p->nOptimizeDenseKMax);
 
     for (int si = 0; si < nSchedule; si++) {
         int curK = kSchedule[si];
@@ -2154,7 +2159,7 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
 #if !defined(ABC_NAMESPACE)
 extern "C"
 #endif
-void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, char * pSolver, char * pOutDir, char * pPrefix, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax) {
+void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, char * pSolver, char * pOutDir, char * pPrefix, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin) {
     Minr_Man_t Man;
     Minr_Man_t * p = &Man;
     memset(p, 0, sizeof(Minr_Man_t));
@@ -2179,6 +2184,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     p->totalTimeout = totalTimeout;
     p->nDontCarePercent = nDontCarePercent;
     p->nOptimizeDenseKMax = nOptimizeDenseKMax;
+    p->nOptimizeDenseKMin = nOptimizeDenseKMin;
 
     // Optional: derive target reset value by random multi-frame simulation (-r)
     // If user didn't explicitly provide -I, pass NULL so random sim starts from random state.

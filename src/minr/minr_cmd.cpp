@@ -44,7 +44,8 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
     double totalTimeout = 0.0;  // -t <sec> (total time budget)
     int fExplicitInit = 0;      // track if user gave -I explicitly
     int nDontCarePercent = 0;   // -D <1..99> don't care percentage (requires -r)
-    int nOptimizeDenseKMax = -1; // -K N: with -O 1, sweep k=0..N; default -1 = geometric
+    int nOptimizeDenseKMax = -1; // -K N: with -O 1, dense sweep up to N; default -1 = geometric
+    int nOptimizeDenseKMin = 0;  // with -K: start k from -k (set below), else 0
 
     Extra_UtilGetoptReset();
     while ((c = Extra_UtilGetopt(argc, argv, "k:I:S:d:D:p:v:r:R:o:t:x:O:c:CXK:h")) != EOF) {
@@ -202,11 +203,18 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
         Abc_Print(-1, "Error: -k must be non-negative.\n");
         return 0;
     }
-    if (nOptimizeMode != 0 && nFrames != -1) {
-        Abc_Print(1, "Warning: -k ignored in optimize mode (-O). k will be swept automatically.\n");
-    }
-    if (nOptimizeMode != 0) {
-        nFrames = 1; // initial k for optimize mode (will be overridden inside)
+    if (nOptimizeMode != 0 && nOptimizeDenseKMax >= 0) {
+        /* Dense sweep (-K): start k from -k if given, else 0; end at -K */
+        nOptimizeDenseKMin = (nFrames >= 0) ? nFrames : 0;
+        if (nOptimizeDenseKMin > nOptimizeDenseKMax) {
+            Abc_Print(-1, "Error: -k <start> must be <= -K <end>.\n");
+            return 0;
+        }
+        nFrames = nOptimizeDenseKMin; /* for -R default when unset, and verbose */
+    } else if (nOptimizeMode != 0) {
+        if (nFrames != -1)
+            Abc_Print(1, "Warning: -k ignored in optimize mode (-O). k will be swept automatically.\n");
+        nFrames = 1; // placeholder for non-dense optimize (overridden inside)
     }
 
     nRegs = Gia_ManRegNum(pGia);
@@ -273,7 +281,7 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
         pSolver = (char *)"third_party/EvalMaxSAT2022/libipamirEvalMaxSAT2022.so";
 
     // Call Minr_Solve function
-    Minr_Solve(pGia, nFrames, pInitStr, fExplicitInit, fRandTarget, nRandomSim, pSolver, pOutDir, pPrefix, vLevel, seed, nRefineMode, fRefineBindDc, nRefineConfLimit, fRefineCoreOnly, pReportFile, nOptimizeMode, totalTimeout, nDontCarePercent, nOptimizeDenseKMax);
+    Minr_Solve(pGia, nFrames, pInitStr, fExplicitInit, fRandTarget, nRandomSim, pSolver, pOutDir, pPrefix, vLevel, seed, nRefineMode, fRefineBindDc, nRefineConfLimit, fRefineCoreOnly, pReportFile, nOptimizeMode, totalTimeout, nDontCarePercent, nOptimizeDenseKMax, nOptimizeDenseKMin);
 
     if (pInitStrAlloc) free(pInitStrAlloc);
     return 0;
@@ -297,7 +305,7 @@ usage:
     Abc_Print(-2, "\t-c <nConf>  : SAT refine conflict limit (default 10000, 0=unlimited)\n");
     Abc_Print(-2, "\t-C          : core-only refine (skip trial release; do one UNSAT-core release)\n");
     Abc_Print(-2, "\t-O <mode>   : optimize mode (1=sweep k, 2=outer-loop); argument required\n");
-    Abc_Print(-2, "\t-K <N>      : with -O 1 only: sweep k=0,1,...,N instead of 0,1,2,4,...\n");
+    Abc_Print(-2, "\t-K <N>      : with -O 1 only: dense sweep from -k (default 0) through N; omit -k to start at 0\n");
     Abc_Print(-2, "\t-h          : print the command usage\n");
     return 1;
 }
