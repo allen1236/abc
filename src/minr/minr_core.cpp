@@ -10,11 +10,6 @@
 
 #include "minr.h"
 #include "minr_ipamir_dyn.h"
-#include <chrono>
-#include <signal.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
 #include <time.h>
 
 ABC_NAMESPACE_IMPL_START
@@ -650,190 +645,6 @@ static Vec_Int_t * Minr_CallSolverIpamir( Minr_Man_t * p, Vec_Wec_t * vHardClaus
     return vModel;
 }
 
-Vec_Int_t * Minr_CallSolver(Minr_Man_t * p, char * pFileName, char * pSolverPath, double timeoutSec) {
-    char LogFile[1000];
-    sprintf(LogFile, "%s.log", pFileName);
-
-    char * pPath = pSolverPath ? pSolverPath : (char *)"third_party/EvalMaxSAT2022/libipamirEvalMaxSAT2022.so";
-    if (access(pPath, F_OK) == -1) {
-        printf("[Minr] Solver binary not found: %s\n", pPath);
-        p->solverStatus = 3;
-        return NULL;
-    }
-
-    // Run external solver with CPU-time limit (timeoutSec). If timeoutSec == 0, run unlimited.
-    // CPU time here refers to the child process CPU usage (utime+stime).
-    pid_t pid;
-    abctime clk = Abc_Clock();
-    {
-        pid = fork();
-        if (pid == -1) {
-            perror("[Minr] fork");
-            p->solverStatus = 3;
-            return NULL;
-        }
-        if (pid == 0) {
-            // child: redirect stdout to log file, then exec solver
-            FILE * f = freopen(LogFile, "w", stdout);
-            (void)f;
-            // also redirect stderr to stdout for easier debug
-            dup2(fileno(stdout), fileno(stderr));
-            execl(pPath, pPath, pFileName, (char *)NULL);
-            perror("[Minr] exec");
-            _exit(127);
-        }
-    }
-
-    long hz = sysconf(_SC_CLK_TCK);
-    long long cpuLimitTicks = (timeoutSec > 0) ? (long long)(timeoutSec * (double)hz) : -1;
-    int status = 0;
-    int timedOut = 0;
-    for (;;) {
-        pid_t w = waitpid(pid, &status, WNOHANG);
-        if (w == pid) break;
-        if (w == -1) {
-            perror("[Minr] waitpid");
-            p->solverStatus = 3;
-            break;
-        }
-
-        if (cpuLimitTicks >= 0) {
-            // read /proc/<pid>/stat for utime+stime
-            char path[128];
-            sprintf(path, "/proc/%d/stat", (int)pid);
-            FILE * fp = fopen(path, "r");
-            if (fp) {
-                // format: pid (comm) state ppid ... utime stime ...
-                int rpid = 0;
-                char comm[256];
-                char state = 0;
-                // read first 3 fields; comm may contain spaces but is wrapped in ()
-                if (fscanf(fp, "%d %255s %c", &rpid, comm, &state) == 3) {
-                    // skip fields 4..13 (10 ints/lls), then read utime/stime (14/15)
-                    long long dummy;
-                    for (int i = 0; i < 10; i++) {
-                        if (fscanf(fp, "%lld", &dummy) != 1) { dummy = 0; break; }
-                    }
-                    unsigned long long ut = 0, stt = 0;
-                    if (fscanf(fp, "%llu %llu", &ut, &stt) == 2) {
-                        long long used = (long long)(ut + stt);
-                        if (used >= cpuLimitTicks) {
-                            timedOut = 1;
-                            kill(pid, SIGKILL);
-                        }
-                    }
-                }
-                fclose(fp);
-            }
-        }
-        // 10ms polling
-        usleep(10000);
-    }
-
-    p->timeSolver = Abc_Clock() - clk;
-    if (p->vLevel > 0) Abc_PrintTime(1, "Solver runtime", p->timeSolver);
-
-    if (timedOut) {
-        printf("[Minr] Solver timed out (%.1f sec CPU limit).\n", timeoutSec);
-        p->solverStatus = 4;
-        return NULL;
-    }
-    if (WIFEXITED(status) && WEXITSTATUS(status) != 30) {
-        // old code expected 7680 from system(); now we see raw exit code.
-        if (p->vLevel > 0) printf("[Minr] Solver exit code %d\n", WEXITSTATUS(status));
-    }
-
-    FILE * pFile = fopen(LogFile, "r");
-    if (pFile == NULL) {
-        printf("[Minr] Cannot open solver log file: %s\n", LogFile);
-        return NULL;
-    }
-
-    Vec_Int_t * vModel = NULL;
-    char LineBuf[1024];
-    int fStatusFound = 0;
-
-    // First pass: find "s " status line and determine assignment format
-    int fStandardDimacs = -1;  // -1 = unknown, 0 = bitstring, 1 = standard DIMACS
-    while (fgets(LineBuf, sizeof(LineBuf), pFile)) {
-        if (strncmp(LineBuf, "s ", 2) == 0 && !fStatusFound) {
-            fStatusFound = 1;
-            if (strstr(LineBuf, "OPTIMUM FOUND")) {
-                p->solverStatus = 1;
-            } else if (strstr(LineBuf, "UNSATISFIABLE")) {
-                p->solverStatus = 2;
-                printf("[Minr] Problem is UNSATISFIABLE.\n");
-                fclose(pFile);
-                return NULL;
-            } else {
-                p->solverStatus = 3;
-                LineBuf[strcspn(LineBuf, "\r\n")] = '\0';
-                printf("[Minr] Unexpected solver status: \"%s\"\n", LineBuf);
-                fclose(pFile);
-                return NULL;
-            }
-        }
-        else if (strncmp(LineBuf, "v ", 2) == 0 && fStandardDimacs == -1) {
-            char * pStr = LineBuf + 2;
-            for (int k = 0; pStr[k] && pStr[k] != '\n' && pStr[k] != '\r'; k++) {
-                if (pStr[k] == ' ') { fStandardDimacs = 1; break; }
-            }
-            if (fStandardDimacs == -1) fStandardDimacs = 0;
-        }
-    }
-
-    if (!fStatusFound) {
-        p->solverStatus = 3;
-        printf("[Minr] No status line (\"s ...\") found in solver output.\n");
-        fclose(pFile);
-        return NULL;
-    }
-
-    // Second pass: decode assignment
-    rewind(pFile);
-    vModel = Vec_IntStart(p->nSatVars + 1);
-
-    if (p->vLevel > 1) printf("[Minr] fStandardDimacs: %d\n", fStandardDimacs);
-
-    while (fgets(LineBuf, sizeof(LineBuf), pFile)) {
-        if (strncmp(LineBuf, "v ", 2) == 0) {
-            if (fStandardDimacs == 1) {
-                char * pStr = LineBuf + 2;
-                char * pToken = strtok(pStr, " \t\r\n");
-                while (pToken) {
-                    int Lit = atoi(pToken);
-                    if (Lit != 0) {
-                        int Var = abs(Lit);
-                        if (Var <= p->nSatVars)
-                            Vec_IntWriteEntry(vModel, Var, (Lit > 0) ? 1 : 0);
-                    }
-                    pToken = strtok(NULL, " \t\r\n");
-                }
-            } else {
-                int offset = 0;
-                int isFirstLine = 1;
-                while (offset < p->nSatVars) {
-                    char * pStr = isFirstLine ? (LineBuf + 2) : LineBuf;
-                    int i = 0;
-                    while (pStr[i] && pStr[i] != '\n' && pStr[i] != '\r') {
-                        if (offset + 1 > p->nSatVars) break;
-                        Vec_IntWriteEntry(vModel, offset + 1, (pStr[i] == '1') ? 1 : 0);
-                        offset++;
-                        i++;
-                    }
-                    if (offset >= p->nSatVars) break;
-                    if (pStr[i] == '\n' || pStr[i] == '\r') break;
-                    if (!fgets(LineBuf, sizeof(LineBuf), pFile)) break;
-                    if (strncmp(LineBuf, "v ", 2) == 0) break;
-                    isFirstLine = 0;
-                }
-            }
-        }
-    }
-    fclose(pFile);
-    return vModel;
-}
-
 // Scenario 1: Verify the result by simulation
 // Uses decoded PI sequence / reset values when available; otherwise falls back to vModel.
 int Minr_VerifyResult(Minr_Man_t * p, Vec_Int_t * vModel) {
@@ -1028,7 +839,8 @@ void Minr_DecodeResult(Minr_Man_t * p, Vec_Int_t * vModel) {
     if (!vModel) return;
 
     printf("\n[Minr] Result Decoding:\n");
-    
+    printf("  inputs = %d, outputs = %d\n", Gia_ManPiNum(p->pGia), Gia_ManPoNum(p->pGia));
+
     // Decode PI Sequence
     if (p->nFrames == 0) printf("  PI Sequence: (k=0, no steps)\n");
     else printf("  PI Sequence (t=0..%d):\n", p->nFrames - 1);
@@ -1087,19 +899,19 @@ void Minr_DecodeResult(Minr_Man_t * p, Vec_Int_t * vModel) {
     }
     printf("    Specified Regs  : %d\n", nSpecRegs);
     if (nTotal > 0)
-        printf("    Reset Ratio     : %.2f%%\n", 100.0 * nResets / nTotal);
+        printf("    R/F (reset/FF)  : %.2f%%\n", 100.0 * nResets / nTotal);
     if (nSpecRegs > 0)
-        printf("    Reduction       : %.2f%%\n", 100.0 * (1.0 - (double)nResets / (double)nSpecRegs));
+        printf("    R/S (reset/spec): %.2f%%\n", 100.0 * (double)nResets / (double)nSpecRegs);
     else
-        printf("    Reduction       : N/A\n");
+        printf("    R/S (reset/spec): N/A\n");
     if (p->nRefineMode > 0) {
         int nBefore = nResets + p->nRefineReleased;
         if (nTotal > 0)
-            printf("    Reset Ratio (before refine): %.2f%%\n", 100.0 * nBefore / nTotal);
+            printf("    R/F (before refine): %.2f%%\n", 100.0 * nBefore / nTotal);
         if (nSpecRegs > 0)
-            printf("    Reduction   (before refine): %.2f%%\n", 100.0 * (1.0 - (double)nBefore / (double)nSpecRegs));
+            printf("    R/S (before refine): %.2f%%\n", 100.0 * (double)nBefore / (double)nSpecRegs);
         else
-            printf("    Reduction   (before refine): N/A\n");
+            printf("    R/S (before refine): N/A\n");
     }
 
     
@@ -1160,12 +972,12 @@ static void Minr_DumpReport(Minr_Man_t * p)
     int nSpecRegs = 0;
     for (int ri = 0; ri < nRegs; ri++)
         if (p->pInitStr[ri] == '0' || p->pInitStr[ri] == '1') nSpecRegs++;
-    double resetRatio = nRegs > 0 ? 100.0 * nResetRequired / nRegs : 0.0;
-    double reduction = nSpecRegs > 0 ? 100.0 * (1.0 - (double)nResetRequired / (double)nSpecRegs) : -1.0;
+    double rOverF = nRegs > 0 ? 100.0 * nResetRequired / nRegs : 0.0;
+    double rOverS = nSpecRegs > 0 ? 100.0 * (double)nResetRequired / (double)nSpecRegs : -1.0;
 
     int nResetBefore = nResetRequired + p->nRefineReleased;
-    double resetRatioBefore = (p->nRefineMode > 0 && nRegs > 0) ? (100.0 * nResetBefore / nRegs) : -1.0;
-    double reductionBefore  = (p->nRefineMode > 0 && nSpecRegs > 0) ? (100.0 * (1.0 - (double)nResetBefore / (double)nSpecRegs)) : -1.0;
+    double rOverFBefore = (p->nRefineMode > 0 && nRegs > 0) ? (100.0 * nResetBefore / nRegs) : -1.0;
+    double rOverSBefore  = (p->nRefineMode > 0 && nSpecRegs > 0) ? (100.0 * (double)nResetBefore / (double)nSpecRegs) : -1.0;
 
     // Solver status string
     const char * pStatus;
@@ -1218,21 +1030,23 @@ static void Minr_DumpReport(Minr_Man_t * p)
     // --- [result] ---
     fprintf(pFile, "[result]\n");
     fprintf(pFile, "solver_status  = %s\n",    pStatus);
+    fprintf(pFile, "inputs         = %d\n",    nPI);
+    fprintf(pFile, "outputs        = %d\n",    Gia_ManPoNum(pGia));
     fprintf(pFile, "specified_regs = %d\n",    nSpecRegs);
     fprintf(pFile, "required_reset = %d\n",    nResetRequired);
-    fprintf(pFile, "reset_ratio    = %.2f%%\n", resetRatio);
-    if (reduction >= 0.0)
-        fprintf(pFile, "reduction      = %.2f%%\n", reduction);
+    fprintf(pFile, "r_f            = %.2f%%\n", rOverF);
+    if (rOverS >= 0.0)
+        fprintf(pFile, "r_s            = %.2f%%\n", rOverS);
     else
-        fprintf(pFile, "reduction      = N/A\n");
-    if (p->nRefineMode > 0 && resetRatioBefore >= 0.0)
-        fprintf(pFile, "reset_ratio_before_refine = %.2f%%\n", resetRatioBefore);
+        fprintf(pFile, "r_s            = N/A\n");
+    if (p->nRefineMode > 0 && rOverFBefore >= 0.0)
+        fprintf(pFile, "r_f_before_refine = %.2f%%\n", rOverFBefore);
     else
-        fprintf(pFile, "reset_ratio_before_refine = N/A\n");
-    if (p->nRefineMode > 0 && reductionBefore >= 0.0)
-        fprintf(pFile, "reduction_before_refine   = %.2f%%\n", reductionBefore);
+        fprintf(pFile, "r_f_before_refine = N/A\n");
+    if (p->nRefineMode > 0 && rOverSBefore >= 0.0)
+        fprintf(pFile, "r_s_before_refine = %.2f%%\n", rOverSBefore);
     else
-        fprintf(pFile, "reduction_before_refine   = N/A\n");
+        fprintf(pFile, "r_s_before_refine = N/A\n");
     fprintf(pFile, "cut_verified   = %s\n",    (p->solverStatus == 1) ? (p->fVerifyPass ? "pass" : "fail") : "N/A");
     fprintf(pFile, "cec_verified   = %s\n",    (p->solverStatus == 1) ? (p->fCecVerifyPass ? "pass" : "fail") : "N/A");
     fprintf(pFile, "runtime_sec    = %.3f\n",  totalSec);
@@ -1265,17 +1079,17 @@ static void Minr_DumpReport(Minr_Man_t * p)
             if (Vec_IntEntry(p->vOptIterK, itr) != 0) continue;
             int r0 = Vec_IntEntry(p->vOptIterResets, itr);
             if (r0 < 0) break;
-            fprintf(pFile, "k0_reset_ratio = %.2f%%\n", nRegs > 0 ? 100.0 * r0 / nRegs : 0.0);
+            fprintf(pFile, "k0_r_f = %.2f%%\n", nRegs > 0 ? 100.0 * r0 / nRegs : 0.0);
             if (nSpecRegs > 0)
-                fprintf(pFile, "k0_reduction   = %.2f%%\n", 100.0 * (1.0 - (double)r0 / (double)nSpecRegs));
+                fprintf(pFile, "k0_r_s = %.2f%%\n", 100.0 * (double)r0 / (double)nSpecRegs);
             else
-                fprintf(pFile, "k0_reduction   = N/A\n");
+                fprintf(pFile, "k0_r_s = N/A\n");
             found = 1;
             break;
         }
         if (!found) {
-            fprintf(pFile, "k0_reset_ratio = N/A\n");
-            fprintf(pFile, "k0_reduction   = N/A\n");
+            fprintf(pFile, "k0_r_f = N/A\n");
+            fprintf(pFile, "k0_r_s = N/A\n");
         }
     }
     fprintf(pFile, "\n");
@@ -1318,7 +1132,7 @@ static void Minr_DumpReport(Minr_Man_t * p)
     // --- [iterations] --- (-O 1 only)
     if (p->nOptimizeMode == 1 && p->vOptIterK && Vec_IntSize(p->vOptIterK) > 0) {
         fprintf(pFile, "\n[iterations]\n");
-        fprintf(pFile, "# k, resets, reduction, time_ms\n");
+        fprintf(pFile, "# k, resets, r_s, time_ms\n");
         int itr;
         for (itr = 0; itr < Vec_IntSize(p->vOptIterK); itr++) {
             int iterK      = Vec_IntEntry(p->vOptIterK, itr);
@@ -1327,10 +1141,10 @@ static void Minr_DumpReport(Minr_Man_t * p)
             int iterTimeMs  = Vec_IntEntry(p->vOptIterTimeMs, itr);
             if (iterResets >= 0) {
                 if (nSpecRegs > 0)
-                    fprintf(pFile, "k=%d, resets=%d, reduction=%.2f%%, %dms\n", iterK, iterResets,
-                            100.0 * (1.0 - (double)iterResets / (double)nSpecRegs), iterTimeMs);
+                    fprintf(pFile, "k=%d, resets=%d, r_s=%.2f%%, %dms\n", iterK, iterResets,
+                            100.0 * (double)iterResets / (double)nSpecRegs, iterTimeMs);
                 else
-                    fprintf(pFile, "k=%d, resets=%d, reduction=N/A, %dms\n", iterK, iterResets, iterTimeMs);
+                    fprintf(pFile, "k=%d, resets=%d, r_s=N/A, %dms\n", iterK, iterResets, iterTimeMs);
             } else {
                 const char * pTag;
                 switch (iterStatus) {
@@ -1338,7 +1152,7 @@ static void Minr_DumpReport(Minr_Man_t * p)
                     case 4:  pTag = "timeout"; break;
                     default: pTag = "error";   break;
                 }
-                fprintf(pFile, "k=%d, %s, reduction=N/A, %dms\n", iterK, pTag, iterTimeMs);
+                fprintf(pFile, "k=%d, %s, r_s=N/A, %dms\n", iterK, pTag, iterTimeMs);
             }
         }
     }
@@ -1589,40 +1403,9 @@ static int Minr_SolveSingleK(Minr_Man_t * p, double solverTimeout)
         }
     }
 
-    // 5. Write WCNF
-    char Buffer[1000];
-    const char * pFinalPrefix = p->pPrefix ? p->pPrefix : "minr_out";
-    const char * pFinalDir = p->pOutDir ? p->pOutDir : "_/tmp";
-#ifdef WIN32
-    mkdir(pFinalDir);
-#else
-    mkdir(pFinalDir, 0777);
-#endif
-    if (p->nOptimizeMode != 0)
-        sprintf(Buffer, "%s/%s_k%d.wcnf", pFinalDir, pFinalPrefix, nFrames);
-    else
-        sprintf(Buffer, "%s/%s.wcnf", pFinalDir, pFinalPrefix);
-    if (p->vLevel > 0) printf("Writing WCNF to %s ...\n", Buffer);
-    long long topWeight = Gia_ManRegNum(pGia) + 1;
-    FILE * pFile = fopen(Buffer, "w");
-    if (!pFile) { printf("Error: Cannot open %s\n", Buffer); Vec_IntFree(vSoftLits); return -1; }
-    fprintf(pFile, "p wcnf %d %d %lld\n", p->nSatVars, Vec_WecSize(p->vClauses) + Vec_IntSize(vSoftLits), topWeight);
-    Vec_Int_t * vC; int k, Lit, i;
-    Vec_WecForEachLevel(p->vClauses, vC, k) {
-        fprintf(pFile, "%lld ", topWeight);
-        Vec_IntForEachEntry(vC, Lit, i) fprintf(pFile, "%s%d ", Abc_LitIsCompl(Lit) ? "-" : "", Abc_Lit2Var(Lit));
-        fprintf(pFile, "0\n");
-    }
-    Vec_IntForEachEntry(vSoftLits, Lit, k) fprintf(pFile, "1 %s%d 0\n", Abc_LitIsCompl(Lit) ? "-" : "", Abc_Lit2Var(Lit));
-    fclose(pFile);
-
-    // Call Solver & Decode (PostRelax + Verify are done once in Minr_Solve)
+    // 5. MaxSAT (IPAMIR in-process) & decode (PostRelax + Verify are done once in Minr_Solve)
     {
-        Vec_Int_t * vModel = NULL;
-        if ( p->pSolver && strstr(p->pSolver, ".so") )
-            vModel = Minr_CallSolverIpamir( p, p->vClauses, vSoftLits, p->pSolver, solverTimeout );
-        else
-            vModel = Minr_CallSolver(p, Buffer, p->pSolver, solverTimeout);
+        Vec_Int_t * vModel = Minr_CallSolverIpamir( p, p->vClauses, vSoftLits, MINR_IPAMIR_SO_DEFAULT, solverTimeout );
         if (vModel) {
             Minr_DecodeResult(p, vModel);
             Vec_IntFree(vModel);
@@ -1736,7 +1519,7 @@ void Minr_SolveOptimize(Minr_Man_t * p)
         Vec_IntPush(p->vOptIterTimeMs, iterMs);
 
         if (nResets >= 0) {
-            printf("[Optimize] k=%d: reset_needed=%d (specified=%d, %.2f%%)\n",
+            printf("[Optimize] k=%d: reset_needed=%d (specified=%d, R/S=%.2f%%)\n",
                    curK, nResets, nSpecRegs, nSpecRegs > 0 ? 100.0 * nResets / nSpecRegs : 0.0);
 
             if (nResets < p->bestResetCount) {
@@ -1794,7 +1577,7 @@ void Minr_SolveOptimize(Minr_Man_t * p)
         p->vRoVals0 = p->vBestRoVals0; p->vBestRoVals0 = NULL;
 
         double totalSec = (double)(Abc_Clock() - p->timeSolveStart) / CLOCKS_PER_SEC;
-        printf("\n[Optimize] Final best: k=%d, resets=%d/%d (%.2f%%), total=%.3fs\n",
+        printf("\n[Optimize] Final best: k=%d, resets=%d/%d FF (R/F=%.2f%%), total=%.3fs\n",
                p->bestK, p->bestResetCount, nRegs,
                100.0 * p->bestResetCount / nRegs, totalSec);
     } else {
@@ -2159,7 +1942,7 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
 #if !defined(ABC_NAMESPACE)
 extern "C"
 #endif
-void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, char * pSolver, char * pOutDir, char * pPrefix, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin) {
+void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin) {
     Minr_Man_t Man;
     Minr_Man_t * p = &Man;
     memset(p, 0, sizeof(Minr_Man_t));
@@ -2170,9 +1953,6 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     p->fExplicitInit = fExplicitInit;
     p->fRandTarget = fRandTarget;
     p->nRandomSim = nRandomSim;
-    p->pSolver = pSolver;
-    p->pOutDir = pOutDir;
-    p->pPrefix = pPrefix;
     p->vLevel = vLevel;
     p->seed = seed;
     p->nRefineMode = nRefineMode;

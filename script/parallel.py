@@ -1,5 +1,5 @@
 """
-平行版實驗腳本（邏輯對齊 exp.py，不修改 exp.py）。
+平行版 minr 實驗腳本（批次 benchmark × seed × dc_ratio）。
 各 job 回傳一列；主程式依完成順序寫入 detail CSV。
 
 用法:
@@ -31,13 +31,13 @@ from datetime import datetime
 _PY39 = sys.version_info >= (3, 9)
 
 # ==========================================
-# 實驗參數設定區（與 exp.py 對齊；benchmark 僅留較小電路方便試跑）
+# 實驗參數設定區（benchmark 僅留較小電路方便試跑）
 # ==========================================
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BENCHMARKS = [
-    # "itc99/b01.aig",
+    "itc99/b01.aig",
     # "itc99/b02.aig",
     # "itc99/b03.aig",
     # "itc99/b04.aig",
@@ -52,7 +52,7 @@ BENCHMARKS = [
     # "itc99/b13.aig",
     # "itc99/b14.aig",
     # "iscas89/s1196.aig",
-    # "iscas89/s1238.aig",
+    "iscas89/s1238.aig",
     # "iscas89/s13207.aig",
     # "iscas89/s1423.aig",
     # "iscas89/s1488.aig",
@@ -63,7 +63,7 @@ BENCHMARKS = [
     # "iscas89/s349.aig",
     # "iscas89/s35932.aig",
     # "iscas89/s382.aig",
-    "iscas89/s386.aig",
+    # "iscas89/s386.aig",
     # "iscas89/s38417.aig",
     # "iscas89/s400.aig",
     # "iscas89/s420.aig",
@@ -81,8 +81,8 @@ BENCHMARKS = [
     # "iscas89/s38584.aig",
     # "itc99/b15.aig",
     # "itc99/b17.aig",
-    "itc99/b18.aig",
-    "itc99/b19.aig",
+    # "itc99/b18.aig",
+    # "itc99/b19.aig",
     # "itc99/b20.aig",
     # "itc99/b21.aig",
     # "itc99/b22.aig",
@@ -97,7 +97,7 @@ ABC_BINARY = os.path.join(ROOT_DIR, "abc")
 TIMEOUT_SEC = 1200
 
 K = 1
-SEEDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+SEEDS = [0, 1, 2, 3, 4]
 RANDOM_SIM_CYCLE = 100
 REFINE_MODE = 1
 REFINE_BIND_DC = True
@@ -130,12 +130,12 @@ def main():
         "nodes": r"nodes\s*=\s*(\d+)",
         "specified_regs": r"specified_regs\s*=\s*(\d+)",
         "required_reset": r"required_reset\s*=\s*(\d+)",
-        "reset_ratio": r"reset_ratio\s*=\s*([\d.]+%?)",
-        "reduction": r"reduction\s*=\s*([\d.]+%?|N/A)",
-        "k0_reset_ratio": r"k0_reset_ratio\s*=\s*([\d.]+%?|N/A)",
-        "k0_reduction": r"k0_reduction\s*=\s*([\d.]+%?|N/A)",
-        "reset_ratio_before_refine": r"reset_ratio_before_refine\s*=\s*([\d.]+%?|N/A)",
-        "reduction_before_refine": r"reduction_before_refine\s*=\s*([\d.]+%?|N/A)",
+        "r_f": r"r_f\s*=\s*([\d.]+%?)",
+        "r_s": r"r_s\s*=\s*([\d.]+%?|N/A)",
+        "k0_r_f": r"k0_r_f\s*=\s*([\d.]+%?|N/A)",
+        "k0_r_s": r"k0_r_s\s*=\s*([\d.]+%?|N/A)",
+        "r_f_before_refine": r"r_f_before_refine\s*=\s*([\d.]+%?|N/A)",
+        "r_s_before_refine": r"r_s_before_refine\s*=\s*([\d.]+%?|N/A)",
         "runtime_sec": r"runtime_sec\s*=\s*([\d.]+)",
         "cut_verified": r"cut_verified\s*=\s*(\w+)",
         "cec_verified": r"cec_verified\s*=\s*(\w+)",
@@ -221,21 +221,25 @@ def main():
 
     headers = [
         "circuit",
+        "inputs",
+        "outputs",
         "nodes",
         "ff",
         "dc_ratio",
         "specified",
         "seed",
-        "k0_reset_ratio",
+        "k0_r_f",
         "refine_mode",
         "best_k",
         "required_reset",
-        "reset_ratio",
+        "r_f",
+        "r_s",
         "runtime_sec",
         "opt_status",
         "cut_verified",
         "cec_verified",
-        "reset_ratio_before_refine",
+        "r_f_before_refine",
+        "r_s_before_refine",
         "refine_by_trial",
         "refine_by_core",
         "refine_sec",
@@ -359,19 +363,23 @@ def main():
             out["circuit"] = stem
             out["dc_ratio"] = str(dc_pct)
             out["seed"] = str(seed)
+            out["inputs"] = parsed.get("inputs", "NA")
+            out["outputs"] = parsed.get("outputs", "NA")
             out["nodes"] = parsed.get("nodes", "NA")
             out["ff"] = parsed.get("ff", "NA")
             out["specified"] = parsed.get("specified_regs", "NA")
-            out["k0_reset_ratio"] = parsed.get("k0_reset_ratio", "NA") if OPTIMIZE_MODE else "NA"
+            out["k0_r_f"] = parsed.get("k0_r_f", "NA") if OPTIMIZE_MODE else "NA"
             out["refine_mode"] = parsed.get("refine_mode", "NA")
             out["best_k"] = parsed.get("best_k", "NA") if OPTIMIZE_MODE else "NA"
             out["required_reset"] = parsed.get("required_reset", "NA")
-            out["reset_ratio"] = parsed.get("reset_ratio", "NA")
+            out["r_f"] = parsed.get("r_f", "NA")
+            out["r_s"] = parsed.get("r_s", "NA")
             out["runtime_sec"] = parsed.get("runtime_sec", "NA")
             out["opt_status"] = parsed.get("opt_status", "NA") if OPTIMIZE_MODE else "NA"
             out["cut_verified"] = parsed.get("cut_verified", "NA")
             out["cec_verified"] = parsed.get("cec_verified", "NA")
-            out["reset_ratio_before_refine"] = parsed.get("reset_ratio_before_refine", "NA")
+            out["r_f_before_refine"] = parsed.get("r_f_before_refine", "NA")
+            out["r_s_before_refine"] = parsed.get("r_s_before_refine", "NA")
             out["refine_by_trial"] = parsed.get("refine_by_trial", "NA")
             out["refine_by_core"] = parsed.get("refine_by_core", "NA")
             out["refine_sec"] = parsed.get("refine_sec", "NA")

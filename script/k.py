@@ -1,11 +1,11 @@
 """
-依 k 掃描結果匯出 CSV（搭配 &minr -O 1 -k K_MIN -K K_MAX）：每個 k 一組 reset / reduction / runtime_sec。
+依 k 掃描結果匯出 CSV（搭配 &minr -O 1 -k K_MIN -K K_MAX）：每個 k 一組 reset / r_s / runtime_sec。
 
-reduction 與 minr report [result] 的 reduction 定義相同（非總 ff）：
-  100 * (1 - required_reset / specified_regs)
-其中 specified_regs = target 裡指定為 0/1 的暫存器個數（與 exp.py 用的 specified 欄相同）。
+r_s（R/S，reset/specified）與 minr report [result] 一致：
+  100 * (required_reset / specified_regs)
+其中 specified_regs = target 裡指定為 0/1 的暫存器個數（與 parallel detail 的 specified 欄相同）。
 
-檔名前綴預設 k_（非 exp_）。需已建置支援 -K 的 abc。
+檔名前綴預設 k_。需已建置支援 -K 的 abc。
 
 平行執行（與 parallel.py 類似）:
   python script/k.py [prefix] [max_workers]
@@ -78,13 +78,13 @@ def _to_int(s):
         return None
 
 
-def reduction_from_reset_and_specified(reset_str: str, specified_str: str) -> str:
-    """與 minr [result] reduction 相同：100 * (1 - required_reset / specified_regs)。"""
+def r_s_from_reset_and_specified(reset_str: str, specified_str: str) -> str:
+    """與 minr [result] r_s 相同：100 * (required_reset / specified_regs)。"""
     r = _to_int(reset_str)
     s = _to_int(specified_str)
     if r is None or s is None or s <= 0:
         return "NA"
-    pct = 100.0 * (1.0 - float(r) / float(s))
+    pct = 100.0 * (float(r) / float(s))
     return f"{pct:.2f}%"
 
 
@@ -95,11 +95,22 @@ def parse_iterations_block(content: str):
     if not sec:
         return out
     block = sec.group(1)
-    # New format: k=1, resets=3, reduction=40.00%, 2ms（reduction 改由 Python 依 reset/specified 重算）
+    # k=1, resets=3, r_s=40.00%, 2ms
+    for m in re.finditer(
+        r"^k=(\d+),\s*resets=(\d+),\s*r_s=(N/A|[\d.]+%),\s*(\d+)ms\s*$", block, re.M
+    ):
+        k = int(m.group(1))
+        out[k] = {
+            "reset": m.group(2),
+            "runtime_sec": f"{int(m.group(4)) / 1000.0:.6f}",
+        }
+    # Legacy: k=1, resets=3, reduction=40.00%, 2ms
     for m in re.finditer(
         r"^k=(\d+),\s*resets=(\d+),\s*reduction=(N/A|[\d.]+%),\s*(\d+)ms\s*$", block, re.M
     ):
         k = int(m.group(1))
+        if k in out:
+            continue
         out[k] = {
             "reset": m.group(2),
             "runtime_sec": f"{int(m.group(4)) / 1000.0:.6f}",
@@ -113,11 +124,18 @@ def parse_iterations_block(content: str):
             "reset": m.group(2),
             "runtime_sec": f"{int(m.group(3)) / 1000.0:.6f}",
         }
-    # Failure: k=1, unsat, reduction=N/A, 2ms
+    # Failure: k=1, unsat, r_s=N/A, 2ms
+    for m in re.finditer(
+        r"^k=(\d+),\s*(?:unsat|timeout|error),\s*r_s=N/A,\s*(\d+)ms\s*$", block, re.M
+    ):
+        k = int(m.group(1))
+        out[k] = {"reset": "NA", "runtime_sec": f"{int(m.group(2)) / 1000.0:.6f}"}
     for m in re.finditer(
         r"^k=(\d+),\s*(?:unsat|timeout|error),\s*reduction=N/A,\s*(\d+)ms\s*$", block, re.M
     ):
         k = int(m.group(1))
+        if k in out:
+            continue
         out[k] = {"reset": "NA", "runtime_sec": f"{int(m.group(2)) / 1000.0:.6f}"}
     # Legacy fail: k=1, unsat, 2ms
     for m in re.finditer(r"^k=(\d+),\s*(unsat|timeout|error),\s*(\d+)ms\s*$", block, re.M):
@@ -205,7 +223,7 @@ def main():
     base_headers = ["circuit", "nodes", "ff", "dc_ratio", "specified", "seed"]
     k_headers = []
     for kk in range(K_MIN, K_MAX + 1):
-        k_headers.extend([f"k{kk}_reset", f"k{kk}_reduction", f"k{kk}_runtime_sec"])
+        k_headers.extend([f"k{kk}_reset", f"k{kk}_r_s", f"k{kk}_runtime_sec"])
     headers = base_headers + k_headers
 
     jobs = [(b, s, d) for b in BENCHMARKS for s in SEEDS for d in DC_RATIO]
@@ -322,7 +340,7 @@ def main():
                 else:
                     row[f"k{kk}_reset"] = "NA"
                     row[f"k{kk}_runtime_sec"] = "NA"
-                row[f"k{kk}_reduction"] = reduction_from_reset_and_specified(
+                row[f"k{kk}_r_s"] = r_s_from_reset_and_specified(
                     row[f"k{kk}_reset"], row["specified"]
                 )
 

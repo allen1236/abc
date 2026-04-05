@@ -30,9 +30,6 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
     char* pInitStrAlloc = NULL; // -I default (all 0), caller frees
     int fRandTarget = 0;        // -r
     int nRandomSim = -1;        // -R <num> (default=k if -r given, -1 means not set)
-    char* pSolver = NULL;       // -S
-    char* pOutDir = NULL;       // -d
-    char* pPrefix = NULL;       // -p
     int vLevel = 0;             // -v <level>
     int seed = 0;               // -r (seed)
     int nRefineMode = 0;        // -x <mode>: 0=off, 1=CEC, 2=cut, 3=eq cut
@@ -48,7 +45,7 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
     int nOptimizeDenseKMin = 0;  // with -K: start k from -k (set below), else 0
 
     Extra_UtilGetoptReset();
-    while ((c = Extra_UtilGetopt(argc, argv, "k:I:S:d:D:p:v:r:R:o:t:x:O:c:CXK:h")) != EOF) {
+    while ((c = Extra_UtilGetopt(argc, argv, "k:I:D:v:r:R:o:t:x:O:c:CXK:h")) != EOF) {
         switch (c) {
             case 'k':
                 if (globalUtilOptarg == NULL || globalUtilOptarg[0] == '\0') {
@@ -62,20 +59,6 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
                 if (globalUtilOptarg != NULL)
                     pInitStr = (char *)globalUtilOptarg;
                 break;
-            case 'S':
-                if (globalUtilOptarg == NULL) {
-                    Abc_Print(-1, "Command line switch \"-S\" should be followed by a string.\n");
-                    goto usage;
-                }
-                pSolver = (char *)globalUtilOptarg;
-                break;
-            case 'd':
-                if (globalUtilOptarg == NULL) {
-                    Abc_Print(-1, "Command line switch \"-d\" should be followed by a string.\n");
-                    goto usage;
-                }
-                pOutDir = (char *)globalUtilOptarg;
-                break;
             case 'D':
                 if (globalUtilOptarg == NULL || globalUtilOptarg[0] == '\0') {
                     Abc_Print(-1, "Command line switch \"-D\" should be followed by an integer (1-99).\n");
@@ -86,13 +69,6 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
                     Abc_Print(-1, "Error: -D percentage must be between 1 and 99.\n");
                     goto usage;
                 }
-                break;
-            case 'p':
-                if (globalUtilOptarg == NULL) {
-                    Abc_Print(-1, "Command line switch \"-p\" should be followed by a string.\n");
-                    goto usage;
-                }
-                pPrefix = (char *)globalUtilOptarg;
                 break;
             case 'v':
                 if (globalUtilOptarg == NULL || globalUtilOptarg[0] == '\0') {
@@ -276,27 +252,19 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
         return 0;
     }
 
-    // Default solver: use in-process EvalMaxSAT2022 IPAMIR shared library.
-    if (pSolver == NULL)
-        pSolver = (char *)"third_party/EvalMaxSAT2022/libipamirEvalMaxSAT2022.so";
-
-    // Call Minr_Solve function
-    Minr_Solve(pGia, nFrames, pInitStr, fExplicitInit, fRandTarget, nRandomSim, pSolver, pOutDir, pPrefix, vLevel, seed, nRefineMode, fRefineBindDc, nRefineConfLimit, fRefineCoreOnly, pReportFile, nOptimizeMode, totalTimeout, nDontCarePercent, nOptimizeDenseKMax, nOptimizeDenseKMin);
+    // Call Minr_Solve function (MaxSAT via IPAMIR .so at MINR_IPAMIR_SO_DEFAULT)
+    Minr_Solve(pGia, nFrames, pInitStr, fExplicitInit, fRandTarget, nRandomSim, vLevel, seed, nRefineMode, fRefineBindDc, nRefineConfLimit, fRefineCoreOnly, pReportFile, nOptimizeMode, totalTimeout, nDontCarePercent, nOptimizeDenseKMax, nOptimizeDenseKMin);
 
     if (pInitStrAlloc) free(pInitStrAlloc);
     return 0;
 
 usage:
-    Abc_Print(-2, "usage: &minr [-k <int>] [-I <string>] [-r [<seed>]] [-R <num>] [-D <pct>] [-S <path>] [-d <dir>] [-p <prefix>] [-o <file>] [-v <level>] [-t <sec>] [-x <mode>] [-c <nConf>] [-C] [-O <mode>] [-K <N>]\n");
+    Abc_Print(-2, "usage: &minr [-k <int>] [-I <string>] [-r [<seed>]] [-R <num>] [-D <pct>] [-o <file>] [-v <level>] [-t <sec>] [-x <mode>] [-c <nConf>] [-C] [-O <mode>] [-K <N>]\n");
     Abc_Print(-2, "\t-k <int>    : timeframe expansion depth (t=0..k), k=0 means single frame\n");
     Abc_Print(-2, "\t-I <string> : initial value for latches (0,1,x); default all 0; length = nRegs\n");
     Abc_Print(-2, "\t-r [<seed>] : derive target reset by random simulation (optional seed)\n");
     Abc_Print(-2, "\t-R <num>    : number of random simulation frames (default=k if -r given, 0=no sim)\n");
     Abc_Print(-2, "\t-D <pct>    : set <pct>%% (1-99) of target registers to don't care (requires -r)\n");
-    Abc_Print(-2, "\t-S <path>   : path to MaxSAT solver binary (default third_party/EvalMaxSAT2022/libipamirEvalMaxSAT2022.so)\n");
-    Abc_Print(-2, "\t             or path to IPAMIR shared library (.so) for in-process solving\n");
-    Abc_Print(-2, "\t-d <dir>    : output directory\n");
-    Abc_Print(-2, "\t-p <prefix> : output filename prefix\n");
     Abc_Print(-2, "\t-o <file>   : dump structured report to file\n");
     Abc_Print(-2, "\t-v <level>  : verbose level (0=none, 1=summary, 2=debug)\n");
     Abc_Print(-2, "\t-t <sec>    : total time budget in seconds (used with -O or single -k mode)\n");

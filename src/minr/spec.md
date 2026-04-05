@@ -309,7 +309,7 @@ Command: `&minr`
 
 ```
 &minr [-k <int>] [-I <string>] [-r [<seed>]] [-R <num>] [-D <pct>]
-      [-S <path>] [-d <dir>] [-p <prefix>] [-o <file>] [-v <level>]
+      [-o <file>] [-v <level>]
       [-t <sec>] [-x <mode>] [-X] [-c <nConf>] [-C] [-O <mode>] [-h]
 ```
 

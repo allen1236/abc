@@ -26,6 +26,8 @@ typedef struct Minr_Man_t_ Minr_Man_t;
 #define MINR_OPT_BUDGET_PARTS 10
 // Early stop in optimize: if improvement (vs previous k) below this ratio, stop. 0.001 = 0.1%.
 #define MINR_EARLY_STOP_IMPROVEMENT_RATIO 0.001
+// In-process MaxSAT via IPAMIR (EvalMaxSAT2022); path relative to ABC cwd.
+#define MINR_IPAMIR_SO_DEFAULT "third_party/EvalMaxSAT2022/libipamirEvalMaxSAT2022.so"
 
 struct Minr_Man_t_
 {
@@ -36,9 +38,6 @@ struct Minr_Man_t_
     int         fExplicitInit; // 1 if user explicitly provided -I
     int         fRandTarget; // Use random sim to derive target reset (-r)
     int         nRandomSim;  // Number of random simulation frames (-R, default=k if -r given)
-    char * pSolver;    // Path to MaxSAT solver binary (-S)
-    char * pOutDir;    // Output directory
-    char * pPrefix;    // Output filename prefix
     int         vLevel;     // Verbose level (0/1/2)
     int         seed;       // Random seed
     int         nRefineMode;    // -x <mode>: 0=off, 1=CEC, 2=cut, 3=eq cut
@@ -119,7 +118,7 @@ struct Minr_Man_t_
 
 extern void Minr_ExtractCut( Minr_Man_t * p );
 extern void Minr_ExtractEqCut( Minr_Man_t * p );
-extern void Minr_Solve( Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, char * pSolver, char * pOutDir, char * pPrefix, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin );
+extern void Minr_Solve( Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin );
 extern void Minr_SolveOptimize( Minr_Man_t * p );
 extern void Minr_SolveOptimize2( Minr_Man_t * p );
 

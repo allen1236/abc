@@ -17,13 +17,13 @@ src/minr/
 └── module.make     — Build integration (SRC list)
 ```
 
-Experiment runner: `_/exp.py` (Python script that batch-runs benchmarks and collects CSV results).
+Experiment runner: `script/parallel.py` (Python script that batch-runs benchmarks and collects detail CSV).
 
 ## Command Usage
 
 ```
 &minr [-k <int>] [-I <string>] [-r [<seed>]] [-R <num>] [-D <pct>]
-      [-S <path>] [-d <dir>] [-p <prefix>] [-o <file>] [-v <level>]
+      [-o <file>] [-v <level>]
       [-t <sec>] [-x <mode>] [-X] [-c <nConf>] [-C] [-O <mode>] [-h]
 ```
 
@@ -34,9 +34,6 @@ Experiment runner: `_/exp.py` (Python script that batch-runs benchmarks and coll
 | `-r [<seed>]` | Derive target state via random simulation (optional integer seed). |
 | `-R <num>` | Number of random simulation frames (default: k when `-r` given). |
 | `-D <pct>` | Set `pct`% (1–99) of target registers to don't care (requires `-r`). |
-| `-S <path>` | Path to MaxSAT solver. If it ends with `.so`, `&minr` loads it via IPAMIR and solves in-process; otherwise it is executed as an external solver binary. Default: `third_party/EvalMaxSAT2022/libipamirEvalMaxSAT2022.so`. |
-| `-d <dir>` | Output directory for WCNF files. |
-| `-p <prefix>` | Output filename prefix (default: `minr_out`). |
 | `-o <file>` | Dump structured report (log) to file. |
 | `-v <level>` | Verbose level: 0=none, 1=summary, 2=debug. |
 | `-t <sec>` | Total time budget (seconds). Used as the solver timeout in single-k, and as a global time budget in optimize modes. |
@@ -129,11 +126,7 @@ Steps inside:
 
 4. **Soft clauses (objective)**: For each RO at t=0, create auxiliary variable U_i: `U_i=1 ↔ (T_i=0 ∧ F_i=0)` i.e. "FF_i is unknown". Each `U_i` is a soft clause with weight 1. Maximizing satisfied soft clauses = minimizing resets.
 
-5. **Write WCNF**: Standard weighted partial MaxSAT format. Hard clauses get weight = nRegs+1.
-
-6. **Solve + decode**:
-   - If `-S` ends with `.so`: in-process IPAMIR calls.
-   - Otherwise: external solver binary + parse solver output.
+5. **Solve + decode**: In-process MaxSAT via IPAMIR, loading `MINR_IPAMIR_SO_DEFAULT` (`third_party/EvalMaxSAT2022/libipamirEvalMaxSAT2022.so` relative to the process cwd). No WCNF file is written.
 
 ## SAT-Based Operations (minr_sat.cpp)
 
@@ -162,6 +155,5 @@ Target don't-cares (`x` in `pInitStr`) are supported by binding them to the unro
 
 ## Solver Interface
 
-- Default solver: `third_party/EvalMaxSAT2022/libipamirEvalMaxSAT2022.so` via IPAMIR (in-process).
-- External solver fallback: if `-S` does not end with `.so`, `&minr` runs it as a binary.
+- MaxSAT is solved only through the EvalMaxSAT2022 IPAMIR shared library at `MINR_IPAMIR_SO_DEFAULT` (see `minr.h`). There is no CLI flag to override the path and no external solver subprocess.
 
