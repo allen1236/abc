@@ -1,7 +1,7 @@
 # README: `&minr` Paper/Dev Guideline
 
 > 本文件提供 `&minr` 專案的完整 context，供新的 AI agent 或合作者快速理解：研究動機、問題定義、方法、程式架構、以及目前暫定的實驗設計。  
-> Implementation 細節請參考同目錄的 `dev.md`。
+> Implementation 細節請參考同目錄的 `dev.md`。批次實驗與迴歸腳本說明見 **`script/README.md`**。
 
 ---
 
@@ -277,8 +277,9 @@ MaxSAT solver 回傳的解（哪些 FF 在 `t=0` 需要固定為 0/1）可以再
 
 #### `-O 1`：k sweep（主要 flow）
 
-* 固定 k schedule：`{0, 1, 2, 4, 8, 16, 32, 64, 128, 256}`（doubling + 含 `k=0`）
-* 可搭配 `-t <sec>` 設定總時間預算
+* **預設** k schedule：`{0, 1, 2, 4, 8, 16, 32, 64, 128, 256}`（doubling + 含 `k=0`）。
+* **Dense sweep**：若指定 `-K <N>`（僅與 `-O 1` 併用），則改為從 `-k` 所給起始值（未給 `-k` 時為 `0`）連續掃到 `N`。見 `minr_cmd.cpp` / `dev.md`。
+* 可搭配 `-t <sec>` 設定總時間預算。
 
 每輪迭代：
 1. 計算剩餘時間 `tRemain = totalTimeout - elapsed`，不足 1s 則停止
@@ -310,8 +311,8 @@ Command: `&minr`
 ```
 &minr [-k <int>] [-I <string>] [-r [<seed>]] [-R <num>] [-D <pct>]
       [-o <file>] [-v <level>]
-      [-t <sec>] [-x <mode>] [-X] [-c <nConf>] [-C] [-O <mode>] [-h]
+      [-t <sec>] [-x <mode>] [-X] [-c <nConf>] [-C] [-O <mode>] [-K <N>] [-h]
 ```
 
-> 參數細節與 report 欄位定義請參考 `src/minr/dev.md`（本目錄）。
+> 參數細節與 report 欄位定義請參考同目錄 `dev.md`；實驗／迴歸腳本請參考 `script/README.md`。
 

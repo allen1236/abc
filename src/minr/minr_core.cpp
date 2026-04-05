@@ -28,6 +28,8 @@ ABC_NAMESPACE_IMPL_START
 
 // Helper macros for Dual-Rail
 static inline int Minr_GetVar(Minr_Man_t * p, int ObjId, int Frame) {
+    if (p->vFrameVarBase)
+        return Vec_IntEntry(p->vFrameVarBase, Frame) + 2 * ObjId;
     return Vec_IntEntry(p->vVarMap, ObjId * (p->nFrames + 1) + Frame);
 }
 static inline int Lit_T(Minr_Man_t * p, int ObjId, int Frame) { return Abc_Var2Lit(Minr_GetVar(p, ObjId, Frame), 0); }
@@ -476,20 +478,37 @@ void Minr_PropagateAndCut(Minr_Man_t * p) {
 ///                     CNF GENERATION UTILS                         ///
 ////////////////////////////////////////////////////////////////////////
 
+static inline void Minr_IncrAddLit(Minr_Man_t * p, int AbcLit) {
+    int Var = Abc_Lit2Var(AbcLit);
+    int DLit = Abc_LitIsCompl(AbcLit) ? -Var : Var;
+    p->incrApi.ipamir_add_hard(p->pIncrSolver, (int32_t)DLit);
+}
+static inline void Minr_IncrEndClause(Minr_Man_t * p) {
+    p->incrApi.ipamir_add_hard(p->pIncrSolver, 0);
+}
 void Minr_AddClause(Minr_Man_t * p, Vec_Int_t * vLits) {
+    if (p->pIncrSolver) {
+        int Lit, i;
+        Vec_IntForEachEntry(vLits, Lit, i) Minr_IncrAddLit(p, Lit);
+        Minr_IncrEndClause(p);
+        return;
+    }
     Vec_Int_t * v = Vec_WecPushLevel(p->vClauses);
     Vec_IntAppend(v, vLits);
 }
 void Minr_AddClause1(Minr_Man_t * p, int L1) {
+    if (p->pIncrSolver) { Minr_IncrAddLit(p, L1); Minr_IncrEndClause(p); return; }
     Vec_Int_t * v = Vec_WecPushLevel(p->vClauses);
     Vec_IntPush(v, L1);
 }
 void Minr_AddClause2(Minr_Man_t * p, int L1, int L2) {
+    if (p->pIncrSolver) { Minr_IncrAddLit(p, L1); Minr_IncrAddLit(p, L2); Minr_IncrEndClause(p); return; }
     Vec_Int_t * v = Vec_WecPushLevel(p->vClauses);
     Vec_IntPush(v, L1);
     Vec_IntPush(v, L2);
 }
 void Minr_AddClause3(Minr_Man_t * p, int L1, int L2, int L3) {
+    if (p->pIncrSolver) { Minr_IncrAddLit(p, L1); Minr_IncrAddLit(p, L2); Minr_IncrAddLit(p, L3); Minr_IncrEndClause(p); return; }
     Vec_Int_t * v = Vec_WecPushLevel(p->vClauses);
     Vec_IntPush(v, L1);
     Vec_IntPush(v, L2);
@@ -1424,6 +1443,258 @@ static int Minr_SolveSingleK(Minr_Man_t * p, double solverTimeout)
     return -1;
 }
 
+////////////////////////////////////////////////////////////////////////
+///                  INCREMENTAL MAXSAT FOR -O 1                      ///
+////////////////////////////////////////////////////////////////////////
+
+/**
+ * Minr_IncrAddFrame - Add one timeframe to the persistent IPAMIR solver.
+ * Adds const0, all gate/buffer/illegal-check hard clauses for frame t,
+ * and the latch transition from t-1 to t (when t > 0).
+ * No TFI pruning: the full circuit is encoded for every frame.
+ * PI binary/X constraints and cut constraints are NOT added here —
+ * they are handled by the caller via promotions and assumptions.
+ */
+static void Minr_IncrAddFrame(Minr_Man_t * p, int t)
+{
+    Gia_Man_t * pGia = p->pGia;
+    int nObjs = Gia_ManObjNum(pGia);
+    int iObj;
+    Gia_Obj_t * pObj;
+
+    Vec_IntPush(p->vFrameVarBase, p->nSatVars + 1);
+    p->nSatVars += 2 * nObjs;
+
+    {
+        int c0_T = Lit_T(p, 0, t), c0_F = Lit_F(p, 0, t);
+        Minr_AddClause1(p, Abc_LitNot(c0_T));
+        Minr_AddClause1(p, c0_F);
+    }
+
+    Gia_ManForEachObj(pGia, pObj, iObj) {
+        if (iObj == 0) continue;
+
+        if (Gia_ObjIsCi(pObj))
+            Minr_AddIllegalStateCheck(p, iObj, t);
+
+        if (Gia_ObjIsAnd(pObj)) {
+            Minr_AddAnd(p, iObj, Gia_ObjFaninId0(pObj, iObj),
+                        Gia_ObjFaninId1(pObj, iObj),
+                        Gia_ObjFaninC0(pObj), Gia_ObjFaninC1(pObj), t);
+            Minr_AddIllegalStateCheck(p, iObj, t);
+        }
+
+        if (Gia_ObjIsCo(pObj)) {
+            Minr_AddCoBuffer(p, iObj, Gia_ObjFaninId0(pObj, iObj),
+                             Gia_ObjFaninC0(pObj), t);
+            Minr_AddIllegalStateCheck(p, iObj, t);
+        }
+    }
+
+    if (t > 0) {
+        int i;
+        Gia_ManForEachRi(pGia, pObj, i) {
+            Gia_Obj_t * pObjRoNext = Gia_ManRo(pGia, i);
+            Minr_AddEquiv(p, Gia_ObjId(pGia, pObjRoNext),
+                          Gia_ObjId(pGia, pObj), t, t - 1);
+        }
+    }
+
+    if (p->vLevel > 0)
+        printf("[Incr] Added frame %d (total SAT vars: %d)\n", t, p->nSatVars);
+}
+
+static void Minr_IncrFree(Minr_Man_t * p)
+{
+    if (p->pIncrSolver) {
+        p->incrApi.ipamir_release(p->pIncrSolver);
+        p->pIncrSolver = NULL;
+    }
+    if (p->incrApi.handle) {
+        Minr_IpamirApiUnload(&p->incrApi);
+        memset(&p->incrApi, 0, sizeof(p->incrApi));
+    }
+    if (p->vFrameVarBase) {
+        Vec_IntFree(p->vFrameVarBase);
+        p->vFrameVarBase = NULL;
+    }
+    p->nIncrFrames = -1;
+    p->nIncrPiPromoted = -1;
+    p->fIncrSoftAdded = 0;
+}
+
+/**
+ * Minr_SolveSingleKIncr - Incremental MaxSAT solve for a given k.
+ *
+ * On first call: loads the IPAMIR library, creates a persistent solver,
+ * adds frame 0 and soft clauses.  On subsequent calls (increasing k):
+ * adds the missing frames, promotes PIs of intermediate frames to binary,
+ * then solves with assumptions for cut constraints + PI X at t=k.
+ *
+ * Returns the number of resets, or -1 on failure/timeout.
+ */
+static int Minr_SolveSingleKIncr(Minr_Man_t * p, double solverTimeout)
+{
+    Gia_Man_t * pGia = p->pGia;
+    int k = p->nFrames;
+
+    // Initialize solver on first call
+    if (p->nIncrFrames < 0) {
+        if (!Minr_IpamirApiLoad(&p->incrApi, MINR_IPAMIR_SO_DEFAULT)) {
+            p->solverStatus = 3;
+            return -1;
+        }
+        p->pIncrSolver = p->incrApi.ipamir_init();
+        if (!p->pIncrSolver) {
+            printf("[Minr] ipamir_init() failed.\n");
+            Minr_IpamirApiUnload(&p->incrApi);
+            memset(&p->incrApi, 0, sizeof(p->incrApi));
+            p->solverStatus = 3;
+            return -1;
+        }
+        p->nSatVars = 0;
+        p->vFrameVarBase = Vec_IntAlloc(16);
+    }
+
+    // Reset per-solve fields
+    if (p->vPiVals)  { Vec_IntFree(p->vPiVals);  p->vPiVals  = NULL; }
+    if (p->vRoVals0) { Vec_IntFree(p->vRoVals0); p->vRoVals0 = NULL; }
+    p->solverStatus = 0;
+    p->fVerifyPass  = 0;
+    p->timeSolver   = 0;
+
+    // Add frames 0..k to the solver (only those not yet present)
+    while (p->nIncrFrames < k) {
+        int t = p->nIncrFrames + 1;
+        Minr_IncrAddFrame(p, t);
+        p->nIncrFrames = t;
+    }
+
+    // Add soft clauses (objective) once — after frame 0 is in the solver
+    if (!p->fIncrSoftAdded) {
+        p->fIncrSoftAdded = 1;
+        int i;
+        Gia_Obj_t * pObjRo;
+        Gia_ManForEachRo(pGia, pObjRo, i) {
+            int iObj = Gia_ObjId(pGia, pObjRo);
+            p->nSatVars++;
+            int u_Var = p->nSatVars;
+            int u_Lit = Abc_Var2Lit(u_Var, 0);
+            int t_Lit = Lit_T(p, iObj, 0);
+            int f_Lit = Lit_F(p, iObj, 0);
+            Minr_AddClause2(p, Abc_LitNot(u_Lit), Abc_LitNot(t_Lit));
+            Minr_AddClause2(p, Abc_LitNot(u_Lit), Abc_LitNot(f_Lit));
+            Minr_AddClause3(p, t_Lit, f_Lit, u_Lit);
+            p->incrApi.ipamir_add_soft_lit(p->pIncrSolver,
+                                           (int32_t)(-u_Var), (uint64_t)1);
+        }
+        if (p->vLevel > 0)
+            printf("[Incr] Added %d soft clauses (objective at t=0).\n",
+                   Gia_ManRegNum(pGia));
+    }
+
+    // Promote PIs of frames that are now intermediate (t < k) to binary
+    {
+        int tStart = (p->nIncrPiPromoted >= 0) ? (p->nIncrPiPromoted + 1) : 0;
+        int tEnd   = k - 1;
+        Gia_Obj_t * pObj; int iPi;
+        for (int t = tStart; t <= tEnd; t++) {
+            Gia_ManForEachPi(pGia, pObj, iPi)
+                Minr_AddBinaryConstraint(p, Gia_ObjId(pGia, pObj), t);
+        }
+        if (tEnd >= tStart)
+            p->nIncrPiPromoted = tEnd;
+    }
+
+    // Set assumptions: PI forced X at t=k, cut constraints at t=k
+    {
+        Gia_Obj_t * pObj; int iPi;
+        Gia_ManForEachPi(pGia, pObj, iPi) {
+            int piId  = Gia_ObjId(pGia, pObj);
+            int Var_T = Abc_Lit2Var(Lit_T(p, piId, k));
+            int Var_F = Abc_Lit2Var(Lit_F(p, piId, k));
+            p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)(-Var_T));
+            p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)(-Var_F));
+        }
+
+        int ci, NodeId;
+        Vec_IntForEachEntry(p->vCutNodes, NodeId, ci) {
+            int Val = Vec_IntEntry(p->vPropVals, NodeId);
+            if (Val == MINR_VAL_X) continue;
+            int Var_T = Abc_Lit2Var(Lit_T(p, NodeId, k));
+            int Var_F = Abc_Lit2Var(Lit_F(p, NodeId, k));
+            if (Val == MINR_VAL_0) {
+                p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)(-Var_T));
+                p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)( Var_F));
+            } else {
+                p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)( Var_T));
+                p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)(-Var_F));
+            }
+        }
+    }
+
+    // Attach termination callback for time budget
+    struct Minr_IncrTermState_t { abctime startCpu; abctime limitCpu; };
+    auto IncrTermCb = [](void * pState) -> int {
+        auto * st = (Minr_IncrTermState_t *)pState;
+        return (Abc_Clock() - st->startCpu) >= st->limitCpu;
+    };
+    Minr_IncrTermState_t TermState;
+    if (p->incrApi.ipamir_set_terminate && solverTimeout > 0) {
+        TermState.startCpu = Abc_Clock();
+        TermState.limitCpu = (abctime)(solverTimeout * (double)CLOCKS_PER_SEC);
+        p->incrApi.ipamir_set_terminate(p->pIncrSolver, &TermState, IncrTermCb);
+    }
+
+    // Solve
+    if (p->vLevel > 0)
+        printf("[Incr] Solving k=%d (frames in solver: %d, vars: %d)\n",
+               k, p->nIncrFrames + 1, p->nSatVars);
+
+    abctime clk = Abc_Clock();
+    int32_t st = p->incrApi.ipamir_solve(p->pIncrSolver);
+    p->timeSolver = Abc_Clock() - clk;
+
+    if (p->incrApi.ipamir_set_terminate && solverTimeout > 0)
+        p->incrApi.ipamir_set_terminate(p->pIncrSolver, NULL, NULL);
+
+    if (st == 0) {
+        printf("[Minr] Solver timed out (%.1f sec CPU limit).\n", solverTimeout);
+        p->solverStatus = 4;
+        return -1;
+    }
+    if (st == 20) {
+        p->solverStatus = 2;
+        return -1;
+    }
+    if (st != 30) {
+        p->solverStatus = 3;
+        printf("[Minr] Unexpected IPAMIR solve status: %d\n", st);
+        return -1;
+    }
+
+    p->solverStatus = 1;
+
+    // Extract model from solver
+    Vec_Int_t * vModel = Vec_IntStart(p->nSatVars + 1);
+    for (int v = 1; v <= p->nSatVars; v++) {
+        int32_t val = p->incrApi.ipamir_val_lit(p->pIncrSolver, v);
+        if (val == v)       Vec_IntWriteEntry(vModel, v, 1);
+        else if (val == -v) Vec_IntWriteEntry(vModel, v, 0);
+    }
+
+    Minr_DecodeResult(p, vModel);
+    Vec_IntFree(vModel);
+
+    if (p->solverStatus == 1 && p->vRoVals0) {
+        int nResets = 0, val, idx;
+        Vec_IntForEachEntry(p->vRoVals0, val, idx)
+            if (val == MINR_VAL_0 || val == MINR_VAL_1) nResets++;
+        return nResets;
+    }
+    return -1;
+}
+
 /**
  * Minr_SolveOptimize - Optimize mode: sweep k (default 0,1,2,4,8,... or dense 0..N with -K N)
  * with total time budget, best-so-far tracking, and early stop.
@@ -1510,7 +1781,7 @@ void Minr_SolveOptimize(Minr_Man_t * p)
         double solverTimeout = (p->totalTimeout > 0) ? tRemain : 0;
 
         abctime clkIter = Abc_Clock();
-        int nResets = Minr_SolveSingleK(p, solverTimeout);
+        int nResets = Minr_SolveSingleKIncr(p, solverTimeout);
         int iterMs = (int)((double)(Abc_Clock() - clkIter) * 1000.0 / CLOCKS_PER_SEC);
 
         Vec_IntPush(p->vOptIterK, curK);
@@ -1566,6 +1837,9 @@ void Minr_SolveOptimize(Minr_Man_t * p)
                 printf("[Optimize] Continuing dense sweep (next k).\n");
         }
     }
+
+    // Free incremental solver before restoring best solution
+    Minr_IncrFree(p);
 
     // Restore best solution into p for report dumping
     if (p->bestK >= 0) {
@@ -1946,7 +2220,10 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     Minr_Man_t Man;
     Minr_Man_t * p = &Man;
     memset(p, 0, sizeof(Minr_Man_t));
-    
+
+    p->nIncrFrames    = -1;
+    p->nIncrPiPromoted = -1;
+
     p->pGia = pGia;
     p->nFrames = nFrames;
     p->pInitStr = pInitStr;
@@ -2060,6 +2337,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     Minr_DumpReport( p );
 
     // Cleanup
+    Minr_IncrFree(p);
     if (p->vVarMap) Vec_IntFree(p->vVarMap);
     if (p->vClauses) Vec_WecFree(p->vClauses);
     if (p->vPropVals) Vec_IntFree(p->vPropVals);

@@ -17,14 +17,14 @@ src/minr/
 └── module.make     — Build integration (SRC list)
 ```
 
-Experiment runner: `script/parallel.py` (Python script that batch-runs benchmarks and collects detail CSV).
+Batch experiments and regression: see **`script/README.md`** (`parallel.py`, `k.py`, `stat.py`, `minr_regression.py`, etc.).
 
 ## Command Usage
 
 ```
 &minr [-k <int>] [-I <string>] [-r [<seed>]] [-R <num>] [-D <pct>]
       [-o <file>] [-v <level>]
-      [-t <sec>] [-x <mode>] [-X] [-c <nConf>] [-C] [-O <mode>] [-h]
+      [-t <sec>] [-x <mode>] [-X] [-c <nConf>] [-C] [-O <mode>] [-K <N>] [-h]
 ```
 
 | Flag | Description |
@@ -41,7 +41,8 @@ Experiment runner: `script/parallel.py` (Python script that batch-runs benchmark
 | `-X` | Bind don't-care target ROs to the unrolled circuit at `t=k` (effective with `-x` modes that build a target circuit). |
 | `-c <nConf>` | SAT refine conflict limit. `0=unlimited`. If the initial refine solve returns UNKNOWN due to this limit, no resets are released. |
 | `-C` | Core-only refine (skip trial release; do only UNSAT-core bulk release). |
-| `-O <mode>` | Optimize mode. `1=sweep k` (primary flow), `2=outer-loop heuristic` (fallback for very large circuits). Requires an argument; ignores `-k`. |
+| `-O <mode>` | Optimize mode. `1=sweep k` (primary flow), `2=outer-loop heuristic` (fallback for very large circuits). Requires an argument; if `-k` is also given, optimize mode prints a warning and sweeps k automatically (see `minr_cmd.cpp`). |
+| `-K <N>` | **With `-O 1` only:** dense sweep of k from the value set by `-k` (or `0` if `-k` omitted) through `N` inclusive. Omit for the default geometric schedule `0,1,2,4,8,…`. |
 
 ### Solve Modes (practical guidance)
 

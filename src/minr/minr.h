@@ -13,6 +13,7 @@
 
 #include "base/abc/abc.h"
 #include "aig/gia/gia.h"
+#include "minr_ipamir_dyn.h"
 
 ABC_NAMESPACE_HEADER_START
 
@@ -110,6 +111,14 @@ struct Minr_Man_t_
     Vec_Wec_t * vOpt2OuterInnerK;        // inner k list per outer
     Vec_Wec_t * vOpt2OuterInnerResets;   // inner resets per outer
     Vec_Wec_t * vOpt2OuterInnerTimeMs;   // inner time_ms per outer
+
+    // Incremental MaxSAT state (for -O 1)
+    Minr_IpamirApi_t incrApi;       // IPAMIR API function pointers (valid when pIncrSolver != NULL)
+    void *          pIncrSolver;    // persistent IPAMIR solver instance (NULL = not initialized)
+    int             nIncrFrames;    // highest frame index in solver (-1 = not initialized)
+    int             nIncrPiPromoted;// highest frame with PI binary constraint (-1 = none)
+    int             fIncrSoftAdded; // 1 if soft clauses have been added to the solver
+    Vec_Int_t *     vFrameVarBase;  // base SAT variable for each frame (indexed by frame)
 };
 
 ////////////////////////////////////////////////////////////////////////
