@@ -3,9 +3,9 @@
 
 輸出兩個檔案：
 1) *_detail_*.csv：每個 (電路, seed, dc_ratio) 一列，含各 k 的 reset / r_s / runtime_sec（與先前相同）。
-2) *_pivot_*.csv：每列一個 k；欄位先 k，再依「電路」分組，每個電路內依序為
-   各 dc 的 runtime → 各 dc 的 R/F（reset/ff）→ 各 dc 的 R/S（reset/specified），
-   同一類內 dc 欄依 specified 比例由大到小（S100 在較前，對應 dc_ratio=0）。
+2) *_pivot_*.csv：每列一個 k；欄位先 k，再 **依電路** 輪流：每個電路一段為
+   該電路各 dc 的 runtime → 該電路各 dc 的 R/F → 該電路各 dc 的 R/S，
+   然後下一個電路重複同樣順序。同一 metric 內 dc 欄依 specified 由大到小（S100 在前）。
    欄名例：s1423_rt_S100、s1423_rf_S100、s1423_rs_S100（Sxx = xx% specified）。
 
 r_s（R/S）與 minr report [result] 一致：100 * (required_reset / specified_regs)。
@@ -33,11 +33,14 @@ _PY39 = sys.version_info >= (3, 9)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BENCHMARKS = [
-    "iscas89/s1423.aig",
-    "itc99/b05.aig",
     # "iscas89/s5378.aig",
-    # "iscas89/s9234.aig",
-    # "iscas89/s15850.aig",
+    "iscas89/s35932.aig",
+    "iscas89/s9234.aig",
+    "iscas89/s15850.aig",
+    "iscas89/s13207.aig",
+    "itc99/b12.aig",
+    "itc99/b14.aig",
+    "itc99/b20.aig",
 ]
 
 BENCHMARK_DIR = os.path.join(ROOT_DIR, "benchmarks")
@@ -46,27 +49,27 @@ LOG_DIR = os.path.join(SCRIPT_DIR, "log")
 EXP_DIR = os.path.join(SCRIPT_DIR, "exp")
 
 ABC_BINARY = os.path.join(ROOT_DIR, "abc")
-TIMEOUT_SEC = 1200
+TIMEOUT_SEC = 4000
 
 K_MIN = 0  # 傳給 &minr 的 -k：dense 掃描起始 k（未給 -k 時 minr 預設 0）
-K_MAX = 8  # 傳給 &minr 的 -K：掃描到此 k（含）；需 K_MIN <= K_MAX
+K_MAX = 40  # 傳給 &minr 的 -K：掃描到此 k（含）；需 K_MIN <= K_MAX
 SEEDS = [0]
 RANDOM_SIM_CYCLE = 100
-REFINE_MODE = 1
+REFINE_MODE = 0
 REFINE_BIND_DC = True
 REFINE_CONF_LIMIT = 10000
 REFINE_CORE_ONLY = False
 OTHER_ARGS = ""
 OPTIMIZE_MODE = 1
 DC_RATIO = [0, 50]
-TOTAL_TIMEOUT = 600
+TOTAL_TIMEOUT = 3600
 
 
 def _default_max_workers() -> int:
     w = os.environ.get("MINR_EXP_WORKERS", "").strip()
     if w.isdigit():
         return max(1, int(w))
-    return 8
+    return 7
 
 MAX_WORKERS = _default_max_workers()
 
@@ -292,13 +295,9 @@ def main():
             for dc in dc_order:
                 s = dc_ratio_to_s_label(dc)
                 cols.append(f"{stem}_rt_S{s}")
-        for bench in BENCHMARKS:
-            stem = bench_stem(bench)
             for dc in dc_order:
                 s = dc_ratio_to_s_label(dc)
                 cols.append(f"{stem}_rf_S{s}")
-        for bench in BENCHMARKS:
-            stem = bench_stem(bench)
             for dc in dc_order:
                 s = dc_ratio_to_s_label(dc)
                 cols.append(f"{stem}_rs_S{s}")
