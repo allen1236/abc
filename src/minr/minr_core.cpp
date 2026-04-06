@@ -1554,6 +1554,11 @@ static void Minr_IncrFree(Minr_Man_t * p)
  * adds the missing frames, promotes PIs of intermediate frames to binary,
  * then solves with assumptions for cut constraints + PI X at t=k.
  *
+ * WARNING: EvalMaxSAT2022's ipamir glue implements assumptions via a second
+ * MaxSAT solve on a clone; combined with many ipamir_add_hard clauses this
+ * can return spurious UNSAT on large benchmarks.  -O 1 therefore uses
+ * Minr_SolveSingleK (batch CNF, cut/PI@k as hard clauses) instead of this path.
+ *
  * Returns the number of resets, or -1 on failure/timeout.
  */
 static int Minr_SolveSingleKIncr(Minr_Man_t * p, double solverTimeout)
@@ -1804,7 +1809,10 @@ void Minr_SolveOptimize(Minr_Man_t * p)
         double solverTimeout = (p->totalTimeout > 0) ? tRemain : 0;
 
         abctime clkIter = Minr_CpuTicks();
-        int nResets = Minr_SolveSingleKIncr(p, solverTimeout);
+        // Batch MaxSAT (TFI-pruned CNF, cut/PI@k as hard clauses). The incremental
+        // path (ipamir_assume for cut / PI-X) matches logically but EvalMaxSAT2022's
+        // IPAMIR glue can report spurious UNSAT on large instances (two-phase solve).
+        int nResets = Minr_SolveSingleK(p, solverTimeout);
         int iterMs = (int)((double)(Minr_CpuTicks() - clkIter) * 1000.0 / CLOCKS_PER_SEC);
 
         Vec_IntPush(p->vOptIterK, curK);
