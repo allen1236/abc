@@ -82,9 +82,10 @@ struct Minr_Man_t_
     int         solverStatus;   // 0=not_run, 1=optimum, 2=unsat, 3=error, 4=timeout
     int         fVerifyPass;    // cut-based verification result (1=pass, 0=fail)
     int         fCecVerifyPass; // CEC-based verification result (1=pass, 0=fail)
-    abctime     timeSolveStart; // timer start (after target state derived)
-    abctime     timeSolveEnd;   // timer end (before verification); 0 = use current time
-    abctime     timeSolver;     // MaxSAT solver wall-clock time
+    abctime     timeSolveStart; // timer start (after target state derived); thread CPU ticks
+    abctime     timeSolveEnd;   // timer end (before verification); 0 = use current time; CPU ticks
+    abctime     timeTickAfterOptimize; // after Minr_SolveOptimize (-O 1); 0 if N/A; for runtime_sec floor
+    abctime     timeSolver;     // MaxSAT solver CPU time (same clock as timeSolveStart)
 
     // -O 2 only: intermediate target state and concatenated output
     Vec_Int_t * vPiAtK;         // PI at t=k for current iteration (prev iter's t=0). NULL = first iter
@@ -96,7 +97,8 @@ struct Minr_Man_t_
     Vec_Int_t * vBestPiVals;    // PI sequence of best solution
     Vec_Int_t * vBestRoVals0;   // RO values of best solution
     int         bestSolverStatus;
-    int         optStatus;      // 0=found_best, 1=timeout_with_best, 2=timeout_no_solution
+    int         optStatus;      // 0=found_best, 1=stopped_with_best (see optLastFailSolverStatus), 2=no_solution
+    int         optLastFailSolverStatus; // when optStatus==1: solverStatus that ended sweep (2=UNSAT, 4=timeout)
 
     // Optimize mode: per-iteration log (-O 1)
     Vec_Int_t * vOptIterK;      // k value per iteration

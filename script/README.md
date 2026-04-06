@@ -53,6 +53,8 @@ python3 script/parallel.py [output_prefix] [max_workers]
 - **第二參數**：並行數（可改 `MINR_EXP_WORKERS`）。
 - 實驗矩陣（`BENCHMARKS`、`K` 或 `OPTIMIZE_MODE`、`SEEDS`、`DC_RATIO`、`TOTAL_TIMEOUT` 等）在腳本開頭 **常數區** 修改。
 
+`-O 1` 時 CSV 的 **`opt_status`**：`timeout_with_best` / `unsat_with_best` 見 `src/minr/dev.md`。**`-t` 與 `runtime_sec` 為執行緒 CPU 時間**（多開 `abc` 時較合理）；`timeout_with_best` 時回報的 `runtime_sec` 會對齊約 **`-t` + refine**。
+
 ---
 
 ## `k.py` — 依 k 掃描匯出 CSV

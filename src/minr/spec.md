@@ -295,6 +295,8 @@ MaxSAT solver 回傳的解（哪些 FF 在 `t=0` 需要固定為 0/1）可以再
 
 迭代結束後，恢復 best solution，進入共用的 post-processing（refine + verify + report）。
 
+**關於 `-t` 與 `opt_status`：** `-t` 為 **執行緒 CPU 時間**總預算（利於多進程並行）；每一輪 k 的 MaxSAT 上限為當下剩餘 CPU 秒。若較大 k **UNSAT** 而前面已有可行解，report 為 **`unsat_with_best`**。`runtime_sec` 同為 CPU 秒；`timeout_with_best` 時會將 optimize 段對齊 `-t` 下限再加 refine（見 `dev.md`）。
+
 > 註：概念上，single-k（沒有 `-O`）可視為 `-O 1` sweep 裡「固定某個 k」的單次迭代；差異只在是否自動 sweep 與 best-so-far tracking。
 
 #### `-O 2`：outer-loop heuristic（僅大電路 fallback）

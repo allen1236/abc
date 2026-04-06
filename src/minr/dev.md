@@ -36,7 +36,7 @@ Batch experiments and regression: see **`script/README.md`** (`parallel.py`, `k.
 | `-D <pct>` | Set `pct`% (1–99) of target registers to don't care (requires `-r`). |
 | `-o <file>` | Dump structured report (log) to file. |
 | `-v <level>` | Verbose level: 0=none, 1=summary, 2=debug. |
-| `-t <sec>` | Total time budget (seconds). Used as the solver timeout in single-k, and as a global time budget in optimize modes. |
+| `-t <sec>` | **Thread CPU** time budget (seconds; `Abc_ThreadClock` / `CLOCK_THREAD_CPUTIME_ID` on Linux). Solver limits and optimize-loop remaining time use this clock so many parallel `abc` processes do not skew budgets. |
 | `-x <mode>` | SAT-based post-refine mode: `0=off`, `1=CEC output equiv`, `2=constant cut`, `3=eq cut`. |
 | `-X` | Bind don't-care target ROs to the unrolled circuit at `t=k` (effective with `-x` modes that build a target circuit). |
 | `-c <nConf>` | SAT refine conflict limit. `0=unlimited`. If the initial refine solve returns UNKNOWN due to this limit, no resets are released. |
@@ -49,6 +49,19 @@ Batch experiments and regression: see **`script/README.md`** (`parallel.py`, `k.
 - **Primary flow: `-O 1` (sweep-k)**. This is the default research/experiment flow: automatically tries a fixed `k` schedule (including `k=0`) under a total time budget (optional), tracks best-so-far, and stops early on diminishing returns.
 - **Heuristic fallback: `-O 2` (outer-loop)**. Intended for circuits that are too large for a straightforward sweep. It partitions the total budget into segments and re-targets iteratively.
 - **Single-k**: run once with `-k` and no `-O`. Conceptually, this corresponds to one iteration of the sweep-k flow with a fixed `k`.
+
+### `-t` (CPU time budget) and `opt_status` with `-O 1`
+
+- **`-t`**: **Thread CPU** budget (`Minr_CpuTicks()` → `Abc_ThreadClock`). Elapsed since `timeSolveStart` (set right before propagation/cut) is subtracted each iteration to get **remaining** CPU seconds for that k’s MaxSAT call (IPAMIR terminate callback uses the same clock). It is **not** “600 seconds for every k”; later iterations split whatever CPU budget remains.
+- **`runtime_sec` in the report**: Thread **CPU** seconds from `timeSolveStart` until after refine (before CEC): propagation/cut + optimize iterations + refine. It is **below** `-t` if the sweep stops early (UNSAT, early improvement, perfect solution, or `unsat_with_best`). For **`timeout_with_best`** (last failed iteration hit solver time limit), the reported value is **floored** so the optimize-phase portion is at least `-t` when the raw CPU span is slightly short (solver interrupt granularity), then **plus** refine and small overhead—so you should see ≈ **`-t` + `refine_sec`** in that case.
+- **`opt_status` in the report**:
+  - `found_best`: Normal stop with a best solution.
+  - `unsat_with_best`: A **later** k returned **UNSAT** while a feasible solution existed at a smaller k.
+  - `timeout_with_best`: A **later** k hit the **solver** CPU time limit (remaining budget for that iteration).
+  - `timeout_no_solution`: No optimum for any k tried.
+  - Optional `opt_last_fail_solver_status`: `2` = UNSAT, `4` = timeout.
+
+Older logs may only show `timeout_with_best` for both UNSAT and timeout; newer builds split `unsat_with_best` vs `timeout_with_best`. Older logs used wall-clock for `-t` / `runtime_sec`.
 
 ## Execution Flow
 

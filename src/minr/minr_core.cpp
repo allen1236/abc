@@ -26,6 +26,9 @@ ABC_NAMESPACE_IMPL_START
 // After Abc_Random(1), discard this many Abc_Random(0) per unit of user -r seed (seed 0 = no skip).
 #define MINR_RANDOM_SKIP_MULT 10000u
 
+// Thread CPU time: -t budgets, solver terminate callbacks, runtime_sec (fair when many abc processes run).
+static inline abctime Minr_CpuTicks() { return Abc_ThreadClock(); }
+
 // Helper macros for Dual-Rail
 static inline int Minr_GetVar(Minr_Man_t * p, int ObjId, int Frame) {
     if (p->vFrameVarBase)
@@ -587,7 +590,7 @@ static Vec_Int_t * Minr_CallSolverIpamir( Minr_Man_t * p, Vec_Wec_t * vHardClaus
     };
     auto TermCb = [](void * pState) -> int {
         auto * st = (Minr_TermState_t *)pState;
-        return (Abc_Clock() - st->startCpu) >= st->limitCpu;
+        return (Minr_CpuTicks() - st->startCpu) >= st->limitCpu;
     };
     Minr_TermState_t TermState;
 
@@ -615,18 +618,18 @@ static Vec_Int_t * Minr_CallSolverIpamir( Minr_Man_t * p, Vec_Wec_t * vHardClaus
 
     // Attach time limit if requested (timeoutSec > 0).
     if ( Api.ipamir_set_terminate && timeoutSec > 0 ) {
-        TermState.startCpu = Abc_Clock();
+        TermState.startCpu = Minr_CpuTicks();
         TermState.limitCpu = (abctime)(timeoutSec * (double)CLOCKS_PER_SEC);
         Api.ipamir_set_terminate( s, &TermState, TermCb );
     }
 
-    abctime clk = Abc_Clock();
+    abctime clk = Minr_CpuTicks();
     int32_t st = Api.ipamir_solve( s );
-    p->timeSolver = Abc_Clock() - clk;
+    p->timeSolver = Minr_CpuTicks() - clk;
 
     if ( st == 0 )
     {
-        printf("[Minr] Solver timed out (%.1f sec CPU limit).\n", timeoutSec);
+        printf("[Minr] Solver timed out (%.1f sec thread CPU time limit).\n", timeoutSec);
         p->solverStatus = 4;
         Api.ipamir_release( s );
         Minr_IpamirApiUnload( &Api );
@@ -975,9 +978,19 @@ static void Minr_DumpReport(Minr_Man_t * p)
     ti = localtime(&rawtime);
     strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", ti);
 
-    // Runtime (exclude verification if timeSolveEnd set)
-    abctime clkEnd = p->timeSolveEnd ? p->timeSolveEnd : Abc_Clock();
+    // Runtime (exclude verification if timeSolveEnd set). All ticks: thread CPU (Minr_CpuTicks).
+    abctime clkEnd = p->timeSolveEnd ? p->timeSolveEnd : Minr_CpuTicks();
     double totalSec = (double)(clkEnd - p->timeSolveStart) / CLOCKS_PER_SEC;
+    /* -O 1 + timeout_with_best: IPAMIR may stop slightly before the nominal -t CPU budget elapses;
+       floor the optimize-phase portion so runtime_sec ≈ -t + refine (+ tiny overhead). */
+    if ( p->nOptimizeMode == 1 && p->optStatus == 1 && p->optLastFailSolverStatus == 4 && p->totalTimeout > 0
+         && p->timeTickAfterOptimize > p->timeSolveStart )
+    {
+        abctime optSpan = p->timeTickAfterOptimize - p->timeSolveStart;
+        abctime minPhase = (abctime)(p->totalTimeout * (double)CLOCKS_PER_SEC);
+        if ( optSpan < minPhase )
+            totalSec = (double)( minPhase + (clkEnd - p->timeTickAfterOptimize) ) / CLOCKS_PER_SEC;
+    }
     double solverSec = (double)p->timeSolver / CLOCKS_PER_SEC;
     double refineSec = (double)p->timeRefine / CLOCKS_PER_SEC;
 
@@ -1084,11 +1097,21 @@ static void Minr_DumpReport(Minr_Man_t * p)
         const char * pOptStatus;
         switch (p->optStatus) {
             case 0:  pOptStatus = "found_best";            break;
-            case 1:  pOptStatus = "timeout_with_best";     break;
+            case 1:
+                /* Same internal code; report distinguishes UNSAT vs per-iteration timeout (-t budget is global wall time). */
+                if ( p->optLastFailSolverStatus == 2 )
+                    pOptStatus = "unsat_with_best";
+                else if ( p->optLastFailSolverStatus == 4 )
+                    pOptStatus = "timeout_with_best";
+                else
+                    pOptStatus = "stopped_with_best";
+                break;
             case 2:  pOptStatus = "timeout_no_solution";   break;
             default: pOptStatus = "unknown";               break;
         }
         fprintf(pFile, "opt_status     = %s\n", pOptStatus);
+        if ( p->optStatus == 1 && p->optLastFailSolverStatus != 0 )
+            fprintf(pFile, "opt_last_fail_solver_status = %d\n", p->optLastFailSolverStatus);
         fprintf(pFile, "best_k         = %d\n", p->bestK);
     }
     /* k=0 metrics (only meaningful for -O 1 which sweeps k and logs iterations) */
@@ -1637,11 +1660,11 @@ static int Minr_SolveSingleKIncr(Minr_Man_t * p, double solverTimeout)
     struct Minr_IncrTermState_t { abctime startCpu; abctime limitCpu; };
     auto IncrTermCb = [](void * pState) -> int {
         auto * st = (Minr_IncrTermState_t *)pState;
-        return (Abc_Clock() - st->startCpu) >= st->limitCpu;
+        return (Minr_CpuTicks() - st->startCpu) >= st->limitCpu;
     };
     Minr_IncrTermState_t TermState;
     if (p->incrApi.ipamir_set_terminate && solverTimeout > 0) {
-        TermState.startCpu = Abc_Clock();
+        TermState.startCpu = Minr_CpuTicks();
         TermState.limitCpu = (abctime)(solverTimeout * (double)CLOCKS_PER_SEC);
         p->incrApi.ipamir_set_terminate(p->pIncrSolver, &TermState, IncrTermCb);
     }
@@ -1651,15 +1674,15 @@ static int Minr_SolveSingleKIncr(Minr_Man_t * p, double solverTimeout)
         printf("[Incr] Solving k=%d (frames in solver: %d, vars: %d)\n",
                k, p->nIncrFrames + 1, p->nSatVars);
 
-    abctime clk = Abc_Clock();
+    abctime clk = Minr_CpuTicks();
     int32_t st = p->incrApi.ipamir_solve(p->pIncrSolver);
-    p->timeSolver = Abc_Clock() - clk;
+    p->timeSolver = Minr_CpuTicks() - clk;
 
     if (p->incrApi.ipamir_set_terminate && solverTimeout > 0)
         p->incrApi.ipamir_set_terminate(p->pIncrSolver, NULL, NULL);
 
     if (st == 0) {
-        printf("[Minr] Solver timed out (%.1f sec CPU limit).\n", solverTimeout);
+        printf("[Minr] Solver timed out (%.1f sec thread CPU time limit).\n", solverTimeout);
         p->solverStatus = 4;
         return -1;
     }
@@ -1750,7 +1773,7 @@ void Minr_SolveOptimize(Minr_Man_t * p)
     int prevResetCount = nRegs;  // for early stop comparison
     int fDenseSweep = (p->nOptimizeDenseKMax >= 0); /* -K: run all k=0..N (or until global timeout) for per-k stats */
 
-    printf("\n[Optimize] Starting k-sweep with %s time budget.\n",
+    printf("\n[Optimize] Starting k-sweep with %s thread-CPU time budget.\n",
            p->totalTimeout > 0 ? "limited" : "unlimited");
     if (fDenseSweep)
         printf("[Optimize] Dense sweep (-k .. -K): k=%d..%d; no early exit on 0 resets, UNSAT, or small improvement; stop at last k or time budget.\n",
@@ -1760,12 +1783,12 @@ void Minr_SolveOptimize(Minr_Man_t * p)
         int curK = kSchedule[si];
 
         // Check time budget
-        double elapsed = (double)(Abc_Clock() - p->timeSolveStart) / CLOCKS_PER_SEC;
+        double elapsed = (double)(Minr_CpuTicks() - p->timeSolveStart) / CLOCKS_PER_SEC;
         double tRemain = 0;
         if (p->totalTimeout > 0) {
             tRemain = p->totalTimeout - elapsed;
             if (tRemain <= 1.0) {
-                printf("[Optimize] Time budget exhausted (%.1fs elapsed). Stopping.\n", elapsed);
+                printf("[Optimize] Thread-CPU time budget exhausted (%.1fs elapsed). Stopping.\n", elapsed);
                 break;
             }
         }
@@ -1780,9 +1803,9 @@ void Minr_SolveOptimize(Minr_Man_t * p)
         // Use remaining time as solver timeout (or 0 for unlimited)
         double solverTimeout = (p->totalTimeout > 0) ? tRemain : 0;
 
-        abctime clkIter = Abc_Clock();
+        abctime clkIter = Minr_CpuTicks();
         int nResets = Minr_SolveSingleKIncr(p, solverTimeout);
-        int iterMs = (int)((double)(Abc_Clock() - clkIter) * 1000.0 / CLOCKS_PER_SEC);
+        int iterMs = (int)((double)(Minr_CpuTicks() - clkIter) * 1000.0 / CLOCKS_PER_SEC);
 
         Vec_IntPush(p->vOptIterK, curK);
         Vec_IntPush(p->vOptIterResets, nResets);
@@ -1828,7 +1851,8 @@ void Minr_SolveOptimize(Minr_Man_t * p)
         } else {
             printf("[Optimize] k=%d: no solution (status=%d)\n", curK, p->solverStatus);
             if (!fDenseSweep && (p->solverStatus == 4 || p->solverStatus == 2) && p->bestResetCount <= nRegs) {
-                p->optStatus = 1;  // timeout_with_best
+                p->optStatus = 1;
+                p->optLastFailSolverStatus = p->solverStatus;
                 printf("[Optimize] Solver %s. Keeping best-so-far.\n",
                        p->solverStatus == 4 ? "timed out" : "returned UNSAT");
                 break;
@@ -1850,7 +1874,7 @@ void Minr_SolveOptimize(Minr_Man_t * p)
         p->vPiVals = p->vBestPiVals;   p->vBestPiVals = NULL;
         p->vRoVals0 = p->vBestRoVals0; p->vBestRoVals0 = NULL;
 
-        double totalSec = (double)(Abc_Clock() - p->timeSolveStart) / CLOCKS_PER_SEC;
+        double totalSec = (double)(Minr_CpuTicks() - p->timeSolveStart) / CLOCKS_PER_SEC;
         printf("\n[Optimize] Final best: k=%d, resets=%d/%d FF (R/F=%.2f%%), total=%.3fs\n",
                p->bestK, p->bestResetCount, nRegs,
                100.0 * p->bestResetCount / nRegs, totalSec);
@@ -1910,7 +1934,7 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
 
     for (;; nOuter++) {
         if (p->vLevel >= 3) printf("[Optimize2] >>> outer loop iteration nOuter=%d\n", nOuter);
-        double tOuterStart = (double)(Abc_Clock() - p->timeSolveStart) / CLOCKS_PER_SEC;
+        double tOuterStart = (double)(Minr_CpuTicks() - p->timeSolveStart) / CLOCKS_PER_SEC;
         if (p->totalTimeout > 0 && tOuterStart >= p->totalTimeout - 0.5) {
             printf("[Optimize2] Total time budget exhausted. Stopping.\n");
             break;
@@ -1943,7 +1967,7 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
         Minr_PropagateAndCut(p);
         if (p->vLevel >= 3) printf("[Optimize2] Minr_PropagateAndCut done, cut size=%d\n", p->vCutNodes ? Vec_IntSize(p->vCutNodes) : -1);
 
-        double segStart = Abc_Clock();
+        double segStart = Minr_CpuTicks();
         int segBestResets = nRegs + 1;
         Vec_Int_t * vInnerK = Vec_IntAlloc(16);
         Vec_Int_t * vInnerResets = Vec_IntAlloc(16);
@@ -1972,14 +1996,14 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
 
         for (int si = startSi; si < nSchedule; si++) {
             int curK = kSchedule[si];
-            double elapsed = (double)(Abc_Clock() - p->timeSolveStart) / CLOCKS_PER_SEC;
+            double elapsed = (double)(Minr_CpuTicks() - p->timeSolveStart) / CLOCKS_PER_SEC;
             if (p->totalTimeout > 0 && elapsed >= p->totalTimeout - 1.0) break;
 
-            double segElapsed = (double)(Abc_Clock() - segStart) / CLOCKS_PER_SEC;
+            double segElapsed = (double)(Minr_CpuTicks() - segStart) / CLOCKS_PER_SEC;
             if (segElapsed >= segLimit) {
                 if (p->vLevel > 0)
                     printf("[Optimize2] Segment time (%.2fs) reached. Running refine, then new target.\n", segElapsed);
-                int segMs = (int)((double)(Abc_Clock() - segStart) * 1000.0 / CLOCKS_PER_SEC);
+                int segMs = (int)((double)(Minr_CpuTicks() - segStart) * 1000.0 / CLOCKS_PER_SEC);
                 int segBestR = (segBestResets <= nRegs) ? segBestResets : -1;
                 Vec_IntPush(p->vOpt2OuterSegmentTimeMs, segMs);
                 Vec_IntPush(p->vOpt2OuterBestResets, segBestR);
@@ -2005,9 +2029,9 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
                 }
                 if (p->solverStatus == 1 && p->vPiVals && p->vRoVals0) {
                     if (p->nRefineMode > 0) {
-                        abctime clkRef = Abc_Clock();
+                        abctime clkRef = Minr_CpuTicks();
                         Minr_SatRefine(p);
-                        p->timeRefine = Abc_Clock() - clkRef;
+                        p->timeRefine = Minr_CpuTicks() - clkRef;
                     }
                     {
                         int nR = 0, i;
@@ -2043,9 +2067,9 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
             double solverTimeout = (p->totalTimeout > 0) ? (p->totalTimeout - elapsed) : 0;
             if (solverTimeout > 0 && solverTimeout < 1.0) break;
 
-            abctime clkIter = Abc_Clock();
+            abctime clkIter = Minr_CpuTicks();
             int nResets = Minr_SolveSingleK(p, solverTimeout);
-            int iterMs = (int)((double)(Abc_Clock() - clkIter) * 1000.0 / CLOCKS_PER_SEC);
+            int iterMs = (int)((double)(Minr_CpuTicks() - clkIter) * 1000.0 / CLOCKS_PER_SEC);
 
             Vec_IntPush(vInnerK, curK);
             Vec_IntPush(vInnerResets, nResets);
@@ -2081,7 +2105,7 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
 
         /* Push segment stats and inner iteration data only when we did not break due to segment limit (that path already pushed and freed vInner*) */
         if (!fBrokeSegmentLimit) {
-            int segMs = (int)((double)(Abc_Clock() - segStart) * 1000.0 / CLOCKS_PER_SEC);
+            int segMs = (int)((double)(Minr_CpuTicks() - segStart) * 1000.0 / CLOCKS_PER_SEC);
             Vec_IntPush(p->vOpt2OuterSegmentTimeMs, segMs);
             Vec_IntPush(p->vOpt2OuterBestResets, segBestResets <= nRegs ? segBestResets : -1);
             {
@@ -2105,9 +2129,9 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
             p->vRoVals0 = Vec_IntDup(vSegBestRo);
             p->nFrames = segBestK;
             p->solverStatus = 1;
-            abctime clkRef = Abc_Clock();
+            abctime clkRef = Minr_CpuTicks();
             Minr_SatRefine(p);
-            p->timeRefine = Abc_Clock() - clkRef;
+            p->timeRefine = Minr_CpuTicks() - clkRef;
             Vec_IntFree(vSegBestPi);
             Vec_IntFree(vSegBestRo);
             vSegBestPi = p->vPiVals;
@@ -2151,7 +2175,7 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
             if (p->vLevel > 0) printf("[Optimize2] First segment best_k=0; treating as global optimum. Stopping.\n");
             break;
         }
-        double tTotal = (double)(Abc_Clock() - p->timeSolveStart) / CLOCKS_PER_SEC;
+        double tTotal = (double)(Minr_CpuTicks() - p->timeSolveStart) / CLOCKS_PER_SEC;
         if (p->totalTimeout > 0 && tTotal >= p->totalTimeout - 0.5) break;
         if (segBestResets == 0) break;
         if (Vec_IntSize(vOuterK) == 0) break;  /* no solution at all so far → terminate */
@@ -2199,7 +2223,7 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
     p->pInitStr = pOrigInitStr;
 
     // End of "runtime_sec" measurement: after optimize2 solving, before final verification.
-    p->timeSolveEnd = Abc_Clock();
+    p->timeSolveEnd = Minr_CpuTicks();
 
     p->fCecVerifyPass = Minr_CecVerify(p);
     p->optStatus = 0;
@@ -2283,7 +2307,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
         }
     }
 
-    p->timeSolveStart = Abc_Clock();
+    p->timeSolveStart = Minr_CpuTicks();
     p->timeSolveEnd = 0;
 
     // 0. Pre-processing: Propagation & Cut (shared across all k values)
@@ -2293,6 +2317,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     if ( nOptimizeMode == 1 )
     {
         Minr_SolveOptimize( p );
+        p->timeTickAfterOptimize = Minr_CpuTicks();
     }
     else if ( nOptimizeMode == 2 )
     {
@@ -2311,14 +2336,14 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     {
         if ( p->nRefineMode > 0 )
         {
-            abctime clkRef = Abc_Clock();
+            abctime clkRef = Minr_CpuTicks();
             Minr_SatRefine( p );
-            p->timeRefine = Abc_Clock() - clkRef;
+            p->timeRefine = Minr_CpuTicks() - clkRef;
             if ( p->vLevel > 0 )
                 Abc_PrintTime(1, "[Refine] Refine time", p->timeRefine);
         }
         // End of "runtime_sec" measurement: after refine, before verification.
-        p->timeSolveEnd = Abc_Clock();
+        p->timeSolveEnd = Minr_CpuTicks();
         // Always run x-simulation verify (computes simRegMismatchWeak/StrongPct)
         p->fVerifyPass = Minr_VerifyResult(p, NULL);
         // If refine modified result, also run SAT verify (overrides cut_verified)
@@ -2331,7 +2356,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     else if ( p->nOptimizeMode != 2 )
     {
         // No solution (or -x off): still stop timer before any verification.
-        p->timeSolveEnd = Abc_Clock();
+        p->timeSolveEnd = Minr_CpuTicks();
     }
 
     Minr_DumpReport( p );

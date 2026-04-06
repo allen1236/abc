@@ -267,7 +267,7 @@ usage:
     Abc_Print(-2, "\t-D <pct>    : set <pct>%% (1-99) of target registers to don't care (requires -r)\n");
     Abc_Print(-2, "\t-o <file>   : dump structured report to file\n");
     Abc_Print(-2, "\t-v <level>  : verbose level (0=none, 1=summary, 2=debug)\n");
-    Abc_Print(-2, "\t-t <sec>    : total time budget in seconds (used with -O or single -k mode)\n");
+    Abc_Print(-2, "\t-t <sec>    : thread CPU time budget in seconds (used with -O or single -k mode)\n");
     Abc_Print(-2, "\t-x <mode>   : SAT-based post-refine (0=off, 1=CEC, 2=cut, 3=eq cut)\n");
     Abc_Print(-2, "\t-X          : bind don't-care target ROs to unrolled t=k (only with -x)\n");
     Abc_Print(-2, "\t-c <nConf>  : SAT refine conflict limit (default 10000, 0=unlimited)\n");

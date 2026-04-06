@@ -125,7 +125,14 @@ def main():
                     "outputs": "",
                     "total": 0,
                     "entries": [],
-                    "opt_counts": {"found_best": 0, "timeout_with_best": 0, "timeout_no_solution": 0, "other": 0},
+                    "opt_counts": {
+                        "found_best": 0,
+                        "timeout_with_best": 0,
+                        "unsat_with_best": 0,
+                        "stopped_with_best": 0,
+                        "timeout_no_solution": 0,
+                        "other": 0,
+                    },
                 },
             )
             g["total"] += 1
@@ -244,6 +251,8 @@ def main():
         "total_runs",
         "opt_found_best",
         "opt_timeout_with_best",
+        "opt_unsat_with_best",
+        "opt_stopped_with_best",
         "opt_timeout_no_solution",
         "opt_other",
         "r_f",
@@ -308,6 +317,8 @@ def main():
                 "total_runs": str(g["total"]),
                 "opt_found_best": str(g["opt_counts"]["found_best"]),
                 "opt_timeout_with_best": str(g["opt_counts"]["timeout_with_best"]),
+                "opt_unsat_with_best": str(g["opt_counts"]["unsat_with_best"]),
+                "opt_stopped_with_best": str(g["opt_counts"]["stopped_with_best"]),
                 "opt_timeout_no_solution": str(g["opt_counts"]["timeout_no_solution"]),
                 "opt_other": str(g["opt_counts"]["other"]),
                 "r_f": _fmt_pct(_mean(rfs)),

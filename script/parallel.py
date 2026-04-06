@@ -37,8 +37,8 @@ _PY39 = sys.version_info >= (3, 9)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BENCHMARKS = [
-    "itc99/b01.aig",
-    # "itc99/b02.aig",
+    # "itc99/b01.aig",
+    "itc99/b02.aig",
     # "itc99/b03.aig",
     # "itc99/b04.aig",
     # "itc99/b05.aig",
@@ -52,11 +52,11 @@ BENCHMARKS = [
     # "itc99/b13.aig",
     # "itc99/b14.aig",
     # "iscas89/s1196.aig",
-    "iscas89/s1238.aig",
+    # "iscas89/s1238.aig",
     # "iscas89/s13207.aig",
     # "iscas89/s1423.aig",
     # "iscas89/s1488.aig",
-    # "iscas89/s15850.aig",
+    "iscas89/s15850.aig",
     # "iscas89/s27.aig",
     # "iscas89/s298.aig",
     # "iscas89/s344.aig",
@@ -96,8 +96,8 @@ EXP_DIR = os.path.join(SCRIPT_DIR, "exp")
 ABC_BINARY = os.path.join(ROOT_DIR, "abc")
 TIMEOUT_SEC = 1200
 
-K = 1
-SEEDS = [0, 1, 2, 3, 4]
+K = 0
+SEEDS = [1]
 RANDOM_SIM_CYCLE = 100
 REFINE_MODE = 1
 REFINE_BIND_DC = True
@@ -105,7 +105,7 @@ REFINE_CONF_LIMIT = 10000
 REFINE_CORE_ONLY = False
 OTHER_ARGS = ""
 OPTIMIZE_MODE = 1
-DC_RATIO = [0, 25, 50, 75]
+DC_RATIO = [50]
 TOTAL_TIMEOUT = 600
 
 # 預設 8；可用 MINR_EXP_WORKERS 或命令列第二參數覆寫
