@@ -1,3 +1,8 @@
+"""
+彙總 minr experiment 的 detail CSV，產生 *_stat.csv；並另存 *_barplot.csv（長條圖用：
+每列一電路、一 dc 條件；欄位為 benchmark、specified_ratio（目標，100−dc_ratio）、r_f、
+specified_minus_r_f、actual_specified_pct（實際 specified register 數／ff 總數，百分比，與 valid runs 之 specified 平均一致）。
+"""
 import argparse
 import csv
 import os
@@ -340,6 +345,60 @@ def main():
         w.writerows(rows_out)
 
     print(f"Stat saved to {out_path}")
+
+    # barplot.csv：依電路分組，組內 dc_ratio 由小到大（目標 specified 由大到小）
+    root_noext, _ext = os.path.splitext(out_path)
+    if root_noext.endswith("_stat"):
+        barplot_path = root_noext[:-5] + "_barplot.csv"
+    else:
+        barplot_path = root_noext + "_barplot.csv"
+    barplot_header_row = [
+        "benchmark",
+        "specified_ratio",
+        "r_f",
+        "specified_minus_r_f",
+        "actual_specified_pct",
+    ]
+    barplot_rows = []
+    circuits_sorted = sorted(set(c for c, _ in groups.keys()))
+    for circuit in circuits_sorted:
+        dcs = sorted(d for c, d in groups.keys() if c == circuit)
+        for dc_ratio in dcs:
+            g = groups[(circuit, dc_ratio)]
+            entries = g["entries"]
+            rfs = [e.get("r_f") for e in entries]
+            specs = [e.get("specified") for e in entries]
+            rf_mean = _mean(rfs)
+            spec_mean = _mean(specs)
+            ff_int = _to_int(g.get("ff"))
+            spec_ratio = 100 - int(dc_ratio)
+            sr = str(spec_ratio)
+            if (
+                ff_int is not None
+                and ff_int > 0
+                and spec_mean is not None
+            ):
+                actual_pct = 100.0 * float(spec_mean) / float(ff_int)
+                actual_str = f"{actual_pct:.2f}"
+            else:
+                actual_str = "NA"
+            if rf_mean is None:
+                barplot_rows.append([circuit, sr, "NA", "NA", actual_str])
+            else:
+                barplot_rows.append(
+                    [
+                        circuit,
+                        sr,
+                        f"{rf_mean:.2f}",
+                        f"{float(spec_ratio) - rf_mean:.2f}",
+                        actual_str,
+                    ]
+                )
+    with open(barplot_path, "w", newline="", encoding="utf-8") as f:
+        bw = csv.writer(f)
+        bw.writerow(barplot_header_row)
+        bw.writerows(barplot_rows)
+    print(f"Barplot saved to {barplot_path}")
 
     if mismatch_by_dc:
         print()

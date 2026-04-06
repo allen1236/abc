@@ -1,16 +1,21 @@
 """
-依 k 掃描結果匯出 CSV（搭配 &minr -O 1 -k K_MIN -K K_MAX）：每個 k 一組 reset / r_s / runtime_sec。
+依 k 掃描結果匯出 CSV（搭配 &minr -O 1 -k K_MIN -K K_MAX）。
 
-r_s（R/S，reset/specified）與 minr report [result] 一致：
-  100 * (required_reset / specified_regs)
-其中 specified_regs = target 裡指定為 0/1 的暫存器個數（與 parallel detail 的 specified 欄相同）。
+輸出兩個檔案：
+1) *_detail_*.csv：每個 (電路, seed, dc_ratio) 一列，含各 k 的 reset / r_s / runtime_sec（與先前相同）。
+2) *_pivot_*.csv：每列一個 k；欄位先 k，再依「電路」分組，每個電路內依序為
+   各 dc 的 runtime → 各 dc 的 R/F（reset/ff）→ 各 dc 的 R/S（reset/specified），
+   同一類內 dc 欄依 specified 比例由大到小（S100 在較前，對應 dc_ratio=0）。
+   欄名例：s1423_rt_S100、s1423_rf_S100、s1423_rs_S100（Sxx = xx% specified）。
+
+r_s（R/S）與 minr report [result] 一致：100 * (required_reset / specified_regs)。
 
 檔名前綴預設 k_。需已建置支援 -K 的 abc。
 
 平行執行（與 parallel.py 類似）:
   python script/k.py [prefix] [max_workers]
   環境變數 MINR_EXP_WORKERS 可設預設並行數（預設 8）。
-  Ctrl+C 會終止所有 abc 子程序並 exit 130；已寫入的列保留。
+  Ctrl+C 會終止所有 abc 子程序並 exit 130；結束時寫入已收集的列。
 """
 
 import os
@@ -29,9 +34,10 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BENCHMARKS = [
     "iscas89/s1423.aig",
-    "iscas89/s5378.aig",
-    "iscas89/s9234.aig",
-    "iscas89/s15850.aig",
+    "itc99/b05.aig",
+    # "iscas89/s5378.aig",
+    # "iscas89/s9234.aig",
+    # "iscas89/s15850.aig",
 ]
 
 BENCHMARK_DIR = os.path.join(ROOT_DIR, "benchmarks")
@@ -62,9 +68,7 @@ def _default_max_workers() -> int:
         return max(1, int(w))
     return 8
 
-
 MAX_WORKERS = _default_max_workers()
-
 
 def _to_int(s):
     if s is None:
@@ -86,6 +90,26 @@ def r_s_from_reset_and_specified(reset_str: str, specified_str: str) -> str:
         return "NA"
     pct = 100.0 * (float(r) / float(s))
     return f"{pct:.2f}%"
+
+
+def r_f_from_reset_and_ff(reset_str: str, ff_str: str) -> str:
+    """R/F：100 * (required_reset / ff)，ff 為電路暫存器總數。"""
+    r = _to_int(reset_str)
+    f = _to_int(ff_str)
+    if r is None or f is None or f <= 0:
+        return "NA"
+    pct = 100.0 * (float(r) / float(f))
+    return f"{pct:.2f}%"
+
+
+def dc_ratio_to_s_label(dc_pct: int) -> int:
+    """dc_ratio 為 don't-care 百分比；回傳欄名用的 specified 百分比（S100 = 100% specified）。"""
+    return 100 - int(dc_pct)
+
+
+def sort_dc_ratios_for_columns(dc_list: list) -> list:
+    """同一 metric 內欄位順序：specified 比例大者在前（即 dc_ratio 小者在前）。"""
+    return sorted(dc_list, key=lambda d: (100 - int(d)), reverse=True)
 
 
 def parse_iterations_block(content: str):
@@ -214,6 +238,7 @@ def main():
         max_workers = max(1, int(sys.argv[2].strip()))
 
     detail_csv = build_csv_path(f"{prefix_base}_detail_")
+    pivot_csv = build_csv_path(f"{prefix_base}_pivot_")
 
     def bench_stem(path_or_name: str) -> str:
         base = os.path.basename(path_or_name)
@@ -225,6 +250,80 @@ def main():
     for kk in range(K_MIN, K_MAX + 1):
         k_headers.extend([f"k{kk}_reset", f"k{kk}_r_s", f"k{kk}_runtime_sec"])
     headers = base_headers + k_headers
+
+    def merged_metrics_for_k(matches: list, kk: int) -> tuple:
+        """同一 (電路, dc)、可能多 seed：平均 runtime；reset 取平均後算 R/F、R/S。"""
+        if not matches:
+            return ("NA", "NA", "NA")
+        runtimes = []
+        resets = []
+        specified = None
+        ff = None
+        for r in matches:
+            rt = r.get(f"k{kk}_runtime_sec", "NA")
+            try:
+                if rt != "NA" and str(rt).strip():
+                    runtimes.append(float(rt))
+            except ValueError:
+                pass
+            rs = r.get(f"k{kk}_reset", "NA")
+            ri = _to_int(rs)
+            if ri is not None:
+                resets.append(float(ri))
+            if specified is None:
+                specified = r.get("specified", "NA")
+            if ff is None:
+                ff = r.get("ff", "NA")
+        avg_rt = f"{sum(runtimes) / len(runtimes):.6f}" if runtimes else "NA"
+        avg_reset = (
+            str(int(round(sum(resets) / len(resets)))) if resets else "NA"
+        )
+        rf = r_f_from_reset_and_ff(avg_reset, ff if ff is not None else "NA")
+        r_s = r_s_from_reset_and_specified(
+            avg_reset, specified if specified is not None else "NA"
+        )
+        return (avg_rt, rf, r_s)
+
+    def build_pivot_fieldnames() -> list:
+        cols = ["k"]
+        dc_order = sort_dc_ratios_for_columns(DC_RATIO)
+        for bench in BENCHMARKS:
+            stem = bench_stem(bench)
+            for dc in dc_order:
+                s = dc_ratio_to_s_label(dc)
+                cols.append(f"{stem}_rt_S{s}")
+        for bench in BENCHMARKS:
+            stem = bench_stem(bench)
+            for dc in dc_order:
+                s = dc_ratio_to_s_label(dc)
+                cols.append(f"{stem}_rf_S{s}")
+        for bench in BENCHMARKS:
+            stem = bench_stem(bench)
+            for dc in dc_order:
+                s = dc_ratio_to_s_label(dc)
+                cols.append(f"{stem}_rs_S{s}")
+        return cols
+
+    def build_pivot_rows(all_rows: list) -> list:
+        dc_order = sort_dc_ratios_for_columns(DC_RATIO)
+        out = []
+        for kk in range(K_MIN, K_MAX + 1):
+            row = {"k": kk}
+            for bench in BENCHMARKS:
+                stem = bench_stem(bench)
+                for dc in dc_order:
+                    matches = [
+                        r
+                        for r in all_rows
+                        if r["circuit"] == stem and int(r["dc_ratio"]) == dc
+                    ]
+                    rt, rf, rs = merged_metrics_for_k(matches, kk)
+                    s = dc_ratio_to_s_label(dc)
+                    row[f"{stem}_rt_S{s}"] = rt
+                    row[f"{stem}_rf_S{s}"] = rf
+                    row[f"{stem}_rs_S{s}"] = rs
+            out.append(row)
+        return out
 
     jobs = [(b, s, d) for b in BENCHMARKS for s in SEEDS for d in DC_RATIO]
     n_jobs = len(jobs)
@@ -356,47 +455,63 @@ def main():
                 )
 
     print(f"k.py detail CSV: {detail_csv}")
+    print(f"k.py pivot CSV: {pivot_csv}")
     print(f"Jobs: {n_jobs}, max_workers: {max_workers}")
 
-    write_lock = threading.Lock()
+    all_rows = []
+    all_rows_lock = threading.Lock()
     interrupted = False
 
-    with open(detail_csv, "w", newline="", encoding="utf-8") as detail_f:
-        detail_writer = csv.DictWriter(detail_f, fieldnames=headers)
-        detail_writer.writeheader()
-        detail_f.flush()
-        os.fsync(detail_f.fileno())
+    def write_outputs():
+        if not all_rows:
+            return
+        with open(detail_csv, "w", newline="", encoding="utf-8") as detail_f:
+            detail_writer = csv.DictWriter(detail_f, fieldnames=headers)
+            detail_writer.writeheader()
+            for row in all_rows:
+                detail_writer.writerow(row)
+        pivot_fieldnames = build_pivot_fieldnames()
+        pivot_rows = build_pivot_rows(all_rows)
+        with open(pivot_csv, "w", newline="", encoding="utf-8") as pivot_f:
+            pivot_writer = csv.DictWriter(pivot_f, fieldnames=pivot_fieldnames)
+            pivot_writer.writeheader()
+            for prow in pivot_rows:
+                pivot_writer.writerow(prow)
 
-        executor = ThreadPoolExecutor(max_workers=max_workers)
-        try:
-            future_map = {
-                executor.submit(run_one_job, b, s, d): (b, s, d) for b, s, d in jobs
-            }
-            for fut in as_completed(future_map):
-                try:
-                    row = fut.result()
-                except CancelledError:
-                    continue
-                with write_lock:
-                    detail_writer.writerow(row)
-                    detail_f.flush()
-                    os.fsync(detail_f.fileno())
-        except KeyboardInterrupt:
-            interrupted = True
-            print("\n[Interrupt] 正在停止所有 abc 子程序與未開始的 job …", flush=True)
-            terminate_all_abc_children()
-            if _PY39:
-                executor.shutdown(wait=False, cancel_futures=True)
-            else:
-                executor.shutdown(wait=False)
-            print(f"[Interrupt] 已中止。已寫入的列仍保留於 {detail_csv}", flush=True)
-            sys.exit(130)
-        finally:
-            if not interrupted:
-                executor.shutdown(wait=True)
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        future_map = {
+            executor.submit(run_one_job, b, s, d): (b, s, d) for b, s, d in jobs
+        }
+        for fut in as_completed(future_map):
+            try:
+                row = fut.result()
+            except CancelledError:
+                continue
+            with all_rows_lock:
+                all_rows.append(row)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n[Interrupt] 正在停止所有 abc 子程序與未開始的 job …", flush=True)
+        terminate_all_abc_children()
+        if _PY39:
+            executor.shutdown(wait=False, cancel_futures=True)
+        else:
+            executor.shutdown(wait=False)
+        write_outputs()
+        print(
+            f"[Interrupt] 已中止。已寫入 detail: {detail_csv}，pivot: {pivot_csv}（若有資料）",
+            flush=True,
+        )
+        sys.exit(130)
+    finally:
+        if not interrupted:
+            executor.shutdown(wait=True)
 
     if not interrupted:
-        print(f"\nAll tasks finished. Detail saved to {detail_csv}")
+        write_outputs()
+        print(f"\nAll tasks finished. Detail: {detail_csv}")
+        print(f"Pivot (k 為列、依電路區塊 rt→rf→rs): {pivot_csv}")
 
 
 if __name__ == "__main__":
