@@ -1,16 +1,16 @@
 """
-依 k 掃描結果匯出 CSV（搭配 &minr -O 1 -k K_MIN -K K_MAX）。
+依 k 掃描結果匯出 CSV：每個 (電路, seed, dc_ratio, k) **獨立**呼叫一次 abc，
+`&minr -O 0 -k <k> …`（不開 refine、不做 -O1 dense sweep），讓每個 k 有完整 `-t` 預算。
+
+每個子程序外層以 TIMEOUT_SEC（預設 600）秒為限；傳給 minr 的 `-t` 同為該值。
 
 輸出兩個檔案：
-1) *_detail_*.csv：每個 (電路, seed, dc_ratio) 一列，含各 k 的 reset / r_s / runtime_sec（與先前相同）。
+1) *_detail_*.csv：每個 (電路, seed, dc_ratio) 一列，含各 k 的 reset / r_s / runtime_sec。
 2) *_pivot_*.csv：每列一個 k；欄位先 k，再 **依電路** 輪流：每個電路一段為
    該電路各 dc 的 runtime → 該電路各 dc 的 R/F → 該電路各 dc 的 R/S，
    然後下一個電路重複同樣順序。同一 metric 內 dc 欄依 specified 由大到小（S100 在前）。
-   欄名例：s1423_rt_S100、s1423_rf_S100、s1423_rs_S100（Sxx = xx% specified）。
 
 r_s（R/S）與 minr report [result] 一致：100 * (required_reset / specified_regs)。
-
-檔名前綴預設 k_。需已建置支援 -K 的 abc。
 
 平行執行（與 parallel.py 類似）:
   python script/k.py [prefix] [max_workers]
@@ -49,20 +49,22 @@ LOG_DIR = os.path.join(SCRIPT_DIR, "log")
 EXP_DIR = os.path.join(SCRIPT_DIR, "exp")
 
 ABC_BINARY = os.path.join(ROOT_DIR, "abc")
-TIMEOUT_SEC = 4000
+# 每個獨立 abc 子程序的最長等待（秒），與傳給 &minr 的 -t 一致
+TIMEOUT_SEC = 600
 
-K_MIN = 0  # 傳給 &minr 的 -k：dense 掃描起始 k（未給 -k 時 minr 預設 0）
-K_MAX = 40  # 傳給 &minr 的 -K：掃描到此 k（含）；需 K_MIN <= K_MAX
+K_MIN = 0  # 掃描 k 下限（含）
+K_MAX = 40  # 掃描 k 上限（含）；每個 k 各跑一次 single-k solve
 SEEDS = [0]
 RANDOM_SIM_CYCLE = 100
-REFINE_MODE = 0
+REFINE_MODE = 0  # 不 refine（不加 -x）
 REFINE_BIND_DC = True
 REFINE_CONF_LIMIT = 10000
 REFINE_CORE_ONLY = False
 OTHER_ARGS = ""
-OPTIMIZE_MODE = 1
+OPTIMIZE_MODE = 0  # single frame，非 -O1 sweep
 DC_RATIO = [0, 50]
-TOTAL_TIMEOUT = 3600
+# 每個 k 獨立一次 minr 呼叫的 thread-CPU 上限（秒）
+TOTAL_TIMEOUT = TIMEOUT_SEC
 
 
 def _default_max_workers() -> int:
@@ -113,6 +115,32 @@ def dc_ratio_to_s_label(dc_pct: int) -> int:
 def sort_dc_ratios_for_columns(dc_list: list) -> list:
     """同一 metric 內欄位順序：specified 比例大者在前（即 dc_ratio 小者在前）。"""
     return sorted(dc_list, key=lambda d: (100 - int(d)), reverse=True)
+
+
+def merge_job_results(job_results: list, headers: list, k_min: int, k_max: int) -> list:
+    """將各單一 k 子工作的結果併成每個 (電路, seed, dc) 一列（與原本 detail 寬表相同）。"""
+    buckets = {}
+    for jr in job_results:
+        key = (jr["circuit"], jr["seed"], jr["dc_ratio"])
+        if key not in buckets:
+            row = {h: "NA" for h in headers}
+            row["circuit"] = jr["circuit"]
+            row["seed"] = jr["seed"]
+            row["dc_ratio"] = jr["dc_ratio"]
+            buckets[key] = row
+        row = buckets[key]
+        for fld in ("nodes", "ff", "specified"):
+            v = jr.get(fld)
+            if v is not None and str(v).strip() and str(v).strip().upper() not in ("NA", "N/A"):
+                row[fld] = v
+        kk = jr["kk"]
+        row[f"k{kk}_reset"] = jr["k_reset"]
+        row[f"k{kk}_runtime_sec"] = jr["k_runtime_sec"]
+    for row in buckets.values():
+        spec = row.get("specified", "NA")
+        for kk in range(k_min, k_max + 1):
+            row[f"k{kk}_r_s"] = r_s_from_reset_and_specified(row[f"k{kk}_reset"], spec)
+    return sorted(buckets.values(), key=lambda x: (x["circuit"], x["dc_ratio"], x["seed"]))
 
 
 def parse_iterations_block(content: str):
@@ -187,15 +215,14 @@ def main():
         "specified_regs": r"specified_regs\s*=\s*(\d+)",
     }
 
-    def build_log_suffix(seed: int, dc_pct: int):
-        parts = [f"O{OPTIMIZE_MODE}", f"k{K_MIN}", f"K{K_MAX}", f"r{seed}", f"R{RANDOM_SIM_CYCLE}"]
+    def build_log_suffix(seed: int, dc_pct: int, kk: int):
+        parts = [f"O{OPTIMIZE_MODE}", f"k{kk}", f"r{seed}", f"R{RANDOM_SIM_CYCLE}"]
         if dc_pct > 0:
             parts.append(f"D{dc_pct}")
-        if REFINE_MODE >= 0:
+        if REFINE_MODE > 0:
             parts.append(f"x{REFINE_MODE}")
             if REFINE_BIND_DC:
                 parts.append("X")
-        if REFINE_MODE > 0:
             parts.append(f"c{REFINE_CONF_LIMIT}")
             if REFINE_CORE_ONLY:
                 parts.append("C")
@@ -216,11 +243,10 @@ def main():
             f"DC{min(DC_RATIO)}-{max(DC_RATIO)}",
             f"R{RANDOM_SIM_CYCLE}",
         ]
-        if REFINE_MODE >= 0:
+        if REFINE_MODE > 0:
             parts.append(f"x{REFINE_MODE}")
             if REFINE_BIND_DC:
                 parts.append("X")
-        if REFINE_MODE > 0:
             parts.append(f"c{REFINE_CONF_LIMIT}")
             if REFINE_CORE_ONLY:
                 parts.append("C")
@@ -324,7 +350,13 @@ def main():
             out.append(row)
         return out
 
-    jobs = [(b, s, d) for b in BENCHMARKS for s in SEEDS for d in DC_RATIO]
+    jobs = [
+        (b, s, d, kk)
+        for b in BENCHMARKS
+        for s in SEEDS
+        for d in DC_RATIO
+        for kk in range(K_MIN, K_MAX + 1)
+    ]
     n_jobs = len(jobs)
     progress_lock = threading.Lock()
     run_state = {"active": 0, "done": 0}
@@ -350,17 +382,17 @@ def main():
             except Exception:
                 pass
 
-    def run_one_job(bench: str, seed: int, dc_pct: int) -> dict:
+    def run_one_job(bench: str, seed: int, dc_pct: int, kk: int) -> dict:
         stem = bench_stem(bench)
         with progress_lock:
             run_state["active"] += 1
             print(
-                f"[start active={run_state['active']}] {stem} r={seed} D={dc_pct}",
+                f"[start active={run_state['active']}] {stem} r={seed} D={dc_pct} k={kk}",
                 flush=True,
             )
 
         src_aig = os.path.join(BENCHMARK_DIR, bench)
-        log_suffix = build_log_suffix(seed, dc_pct)
+        log_suffix = build_log_suffix(seed, dc_pct, kk)
         log_path = os.path.join(LOG_DIR, f"{stem}{log_suffix}")
 
         dc_arg = f"-D {dc_pct}" if dc_pct > 0 else ""
@@ -371,11 +403,9 @@ def main():
         timeout_arg = f"-t {TOTAL_TIMEOUT}" if TOTAL_TIMEOUT > 0 else ""
 
         opt_arg = f"-O {OPTIMIZE_MODE}"
-        k_lo_arg = f"-k {K_MIN} "
-        k_hi_arg = f"-K {K_MAX}"
         abc_cmd = (
             f'{ABC_BINARY} -c "read_aiger {src_aig}; &get; &ps;'
-            f'&minr {opt_arg} {k_lo_arg}{k_hi_arg} -r {seed} -R {RANDOM_SIM_CYCLE} {dc_arg} {refine_arg}{bind_arg}{conf_arg}{core_only_arg} {timeout_arg} {OTHER_ARGS} -o {log_path}"'
+            f'&minr {opt_arg} -k {kk} -r {seed} -R {RANDOM_SIM_CYCLE} {dc_arg} {refine_arg}{bind_arg}{conf_arg}{core_only_arg} {timeout_arg} {OTHER_ARGS} -o {log_path}"'
         )
 
         status = "fail"
@@ -423,33 +453,32 @@ def main():
             else:
                 by_k = {}
 
-            row = {h: "NA" for h in headers}
-            row["circuit"] = stem
-            row["dc_ratio"] = str(dc_pct)
-            row["seed"] = str(seed)
-            row["nodes"] = parsed.get("nodes", "NA")
-            row["ff"] = parsed.get("ff", "NA")
-            row["specified"] = parsed.get("specified_regs", "NA")
-
-            for kk in range(K_MIN, K_MAX + 1):
-                if kk in by_k:
-                    row[f"k{kk}_reset"] = by_k[kk]["reset"]
-                    row[f"k{kk}_runtime_sec"] = by_k[kk]["runtime_sec"]
-                else:
-                    row[f"k{kk}_reset"] = "NA"
-                    row[f"k{kk}_runtime_sec"] = "NA"
-                row[f"k{kk}_r_s"] = r_s_from_reset_and_specified(
-                    row[f"k{kk}_reset"], row["specified"]
-                )
+            if kk in by_k:
+                k_reset = by_k[kk]["reset"]
+                k_runtime_sec = by_k[kk]["runtime_sec"]
+            else:
+                k_reset = "NA"
+                k_runtime_sec = "NA"
 
             status = "timeout" if is_timeout else ("ok" if parsed else "fail")
-            return row
+            return {
+                "circuit": stem,
+                "seed": str(seed),
+                "dc_ratio": str(dc_pct),
+                "kk": kk,
+                "nodes": parsed.get("nodes", "NA"),
+                "ff": parsed.get("ff", "NA"),
+                "specified": parsed.get("specified_regs", "NA"),
+                "k_reset": k_reset,
+                "k_runtime_sec": k_runtime_sec,
+                "_status": status,
+            }
         finally:
             with progress_lock:
                 run_state["active"] -= 1
                 run_state["done"] += 1
                 print(
-                    f"[finish {run_state['done']}/{n_jobs} active={run_state['active']}] [{status}] {stem} r={seed} D={dc_pct}",
+                    f"[finish {run_state['done']}/{n_jobs} active={run_state['active']}] [{status}] {stem} r={seed} D={dc_pct} k={kk}",
                     flush=True,
                 )
 
@@ -458,7 +487,6 @@ def main():
     print(f"Jobs: {n_jobs}, max_workers: {max_workers}")
 
     all_rows = []
-    all_rows_lock = threading.Lock()
     interrupted = False
 
     def write_outputs():
@@ -477,18 +505,18 @@ def main():
             for prow in pivot_rows:
                 pivot_writer.writerow(prow)
 
+    job_results = []
     executor = ThreadPoolExecutor(max_workers=max_workers)
     try:
         future_map = {
-            executor.submit(run_one_job, b, s, d): (b, s, d) for b, s, d in jobs
+            executor.submit(run_one_job, b, s, d, kk): (b, s, d, kk)
+            for b, s, d, kk in jobs
         }
         for fut in as_completed(future_map):
             try:
-                row = fut.result()
+                job_results.append(fut.result())
             except CancelledError:
                 continue
-            with all_rows_lock:
-                all_rows.append(row)
     except KeyboardInterrupt:
         interrupted = True
         print("\n[Interrupt] 正在停止所有 abc 子程序與未開始的 job …", flush=True)
@@ -497,20 +525,21 @@ def main():
             executor.shutdown(wait=False, cancel_futures=True)
         else:
             executor.shutdown(wait=False)
-        write_outputs()
+    finally:
+        if not interrupted:
+            executor.shutdown(wait=True)
+
+    all_rows = merge_job_results(job_results, headers, K_MIN, K_MAX)
+    write_outputs()
+    if interrupted:
         print(
             f"[Interrupt] 已中止。已寫入 detail: {detail_csv}，pivot: {pivot_csv}（若有資料）",
             flush=True,
         )
         sys.exit(130)
-    finally:
-        if not interrupted:
-            executor.shutdown(wait=True)
 
-    if not interrupted:
-        write_outputs()
-        print(f"\nAll tasks finished. Detail: {detail_csv}")
-        print(f"Pivot (k 為列、依電路區塊 rt→rf→rs): {pivot_csv}")
+    print(f"\nAll tasks finished. Detail: {detail_csv}")
+    print(f"Pivot (k 為列、依電路區塊 rt→rf→rs): {pivot_csv}")
 
 
 if __name__ == "__main__":
