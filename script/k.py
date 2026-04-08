@@ -2,7 +2,8 @@
 依 k 掃描結果匯出 CSV：每個 (電路, seed, dc_ratio, k) **獨立**呼叫一次 abc，
 `&minr -O 0 -k <k> …`（不開 refine、不做 -O1 dense sweep），讓每個 k 有完整 `-t` 預算。
 
-每個子程序外層以 TIMEOUT_SEC（預設 600）秒為限；傳給 minr 的 `-t` 同為該值。
+傳給 minr 的 `-t` 為 TOTAL_TIMEOUT（秒）；外層 `subprocess.wait` 為 TOTAL_TIMEOUT+30，
+避免 minr 用滿 CPU 預算前就被 Python 先殺掉。
 
 輸出兩個檔案：
 1) *_detail_*.csv：每個 (電路, seed, dc_ratio) 一列，含各 k 的 reset / r_s / runtime_sec。
@@ -33,14 +34,13 @@ _PY39 = sys.version_info >= (3, 9)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BENCHMARKS = [
-    # "iscas89/s5378.aig",
-    "iscas89/s35932.aig",
+    # "iscas89/s35932.aig",
     "iscas89/s9234.aig",
-    "iscas89/s15850.aig",
-    "iscas89/s13207.aig",
-    "itc99/b12.aig",
-    "itc99/b14.aig",
-    "itc99/b20.aig",
+    # "iscas89/s15850.aig",
+    # "iscas89/s13207.aig",
+    # "itc99/b12.aig",
+    # "itc99/b14.aig",
+    # "itc99/b20.aig",
 ]
 
 BENCHMARK_DIR = os.path.join(ROOT_DIR, "benchmarks")
@@ -49,8 +49,9 @@ LOG_DIR = os.path.join(SCRIPT_DIR, "log")
 EXP_DIR = os.path.join(SCRIPT_DIR, "exp")
 
 ABC_BINARY = os.path.join(ROOT_DIR, "abc")
-# 每個獨立 abc 子程序的最長等待（秒），與傳給 &minr 的 -t 一致
-TIMEOUT_SEC = 600
+# 傳給 &minr 的 -t（thread-CPU 秒）；外層 subprocess.wait 會多等 PROC_WAIT_EXTRA_SEC
+TOTAL_TIMEOUT = 600
+PROC_WAIT_EXTRA_SEC = 30
 
 K_MIN = 0  # 掃描 k 下限（含）
 K_MAX = 40  # 掃描 k 上限（含）；每個 k 各跑一次 single-k solve
@@ -61,10 +62,9 @@ REFINE_BIND_DC = True
 REFINE_CONF_LIMIT = 10000
 REFINE_CORE_ONLY = False
 OTHER_ARGS = ""
-OPTIMIZE_MODE = 0  # single frame，非 -O1 sweep
+# 0 = 單一 k 求解，命令列**不帶** -O（minr 只接受 -O 1 或 -O 2）
+OPTIMIZE_MODE = 0
 DC_RATIO = [0, 50]
-# 每個 k 獨立一次 minr 呼叫的 thread-CPU 上限（秒）
-TOTAL_TIMEOUT = TIMEOUT_SEC
 
 
 def _default_max_workers() -> int:
@@ -199,6 +199,33 @@ def parse_iterations_block(content: str):
             continue
         out[k] = {"reset": "NA", "runtime_sec": f"{int(m.group(3)) / 1000.0:.6f}"}
     return out
+
+
+def parse_flat_report_for_k(content: str, expect_k: int):
+    """
+    非 -O1 時報告通常沒有 [iterations]，改由 [settings] 的 k 與 [result] 的
+    required_reset、runtime_sec 取得該次單一 k 的結果。
+    """
+    m_set = re.search(r"\[settings\](.*?)(?:\n\[|\Z)", content, re.S)
+    if m_set:
+        mk = re.search(r"(?m)^\s*k\s*=\s*(\d+)", m_set.group(1))
+        if mk and int(mk.group(1)) != expect_k:
+            return None
+    m_res = re.search(r"\[result\](.*?)(?:\n\[|\Z)", content, re.S)
+    if not m_res:
+        return None
+    block = m_res.group(1)
+    rr = re.search(r"(?m)^required_reset\s*=\s*(\S+)", block)
+    rt = re.search(r"(?m)^runtime_sec\s*=\s*([\d.]+)", block)
+    if not rr or not rt:
+        return None
+    reset_s = rr.group(1).strip()
+    if reset_s.upper() in ("N/A", "NA"):
+        reset_s = "NA"
+    return {
+        "reset": reset_s,
+        "runtime_sec": rt.group(1).strip(),
+    }
 
 
 def main():
@@ -402,10 +429,11 @@ def main():
         core_only_arg = " -C" if (REFINE_MODE > 0 and REFINE_CORE_ONLY) else ""
         timeout_arg = f"-t {TOTAL_TIMEOUT}" if TOTAL_TIMEOUT > 0 else ""
 
-        opt_arg = f"-O {OPTIMIZE_MODE}"
+        # minr 只接受 -O 1 或 -O 2；單一 k 時勿傳 -O 0
+        opt_arg = f"-O {OPTIMIZE_MODE} " if OPTIMIZE_MODE > 0 else ""
         abc_cmd = (
             f'{ABC_BINARY} -c "read_aiger {src_aig}; &get; &ps;'
-            f'&minr {opt_arg} -k {kk} -r {seed} -R {RANDOM_SIM_CYCLE} {dc_arg} {refine_arg}{bind_arg}{conf_arg}{core_only_arg} {timeout_arg} {OTHER_ARGS} -o {log_path}"'
+            f'&minr {opt_arg}-k {kk} -r {seed} -R {RANDOM_SIM_CYCLE} {dc_arg} {refine_arg}{bind_arg}{conf_arg}{core_only_arg} {timeout_arg} {OTHER_ARGS} -o {log_path}"'
         )
 
         status = "fail"
@@ -424,7 +452,7 @@ def main():
                 child_procs.append(proc)
             try:
                 try:
-                    proc.wait(timeout=TIMEOUT_SEC)
+                    proc.wait(timeout=TOTAL_TIMEOUT + PROC_WAIT_EXTRA_SEC)
                 except subprocess.TimeoutExpired:
                     try:
                         proc.kill()
@@ -450,6 +478,10 @@ def main():
                     if match:
                         parsed[key] = match.group(1)
                 by_k = parse_iterations_block(content)
+                if kk not in by_k:
+                    flat = parse_flat_report_for_k(content, kk)
+                    if flat:
+                        by_k[kk] = flat
             else:
                 by_k = {}
 
