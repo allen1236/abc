@@ -216,7 +216,7 @@ def main():
                     "best_k": best_k,
                     "runtime_sec": runtime_sec,
                     "refine_sec": refine_sec,
-                    "r_f": _pct_col(row, "r_f"),
+                    "r_f": _pct_col(row, "r_f", "reset_ratio"),
                     "k0_r_f": _pct_col(row, "k0_r_f", "k0_reset_ratio"),
                     "r_f_before_refine": _pct_col(row, "r_f_before_refine", "reset_ratio_before_refine"),
                     "spec_ro_in_cut": _to_float_percent(row.get("spec_ro_in_cut")),

@@ -3,7 +3,8 @@
 各 job 回傳一列；主程式依完成順序寫入 detail CSV。
 
 用法:
-  python script/parallel.py [prefix] [max_workers]
+  python3 script/parallel.py --prefix <prefix> [--max-workers N]
+  python3 script/parallel.py --csv <existing_detail.csv> --prefix <new_prefix> [--max-workers N]
 
 環境變數:
   MINR_EXP_WORKERS  預設並行數（預設 8）；若命令列有給第二個數字則覆寫。
@@ -24,6 +25,7 @@ import csv
 import sys
 import subprocess
 import threading
+import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
 from datetime import datetime
 
@@ -37,55 +39,55 @@ _PY39 = sys.version_info >= (3, 9)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BENCHMARKS = [
-    "itc99/b01.aig",
-    "itc99/b02.aig",
-    "itc99/b03.aig",
-    "itc99/b04.aig",
-    "itc99/b05.aig",
-    "itc99/b06.aig",
-    "itc99/b07.aig",
-    "itc99/b08.aig",
-    "itc99/b09.aig",
-    "itc99/b10.aig",
-    "itc99/b11.aig",
-    "itc99/b12.aig",
-    "itc99/b13.aig",
-    "itc99/b14.aig",
-    "iscas89/s1196.aig",
-    "iscas89/s1238.aig",
+    # "itc99/b01.aig",
+    # "itc99/b02.aig",
+    # "itc99/b03.aig",
+    # "itc99/b04.aig",
+    # "itc99/b05.aig",
+    # "itc99/b06.aig",
+    # "itc99/b07.aig",
+    # "itc99/b08.aig",
+    # "itc99/b09.aig",
+    # "itc99/b10.aig",
+    # "itc99/b11.aig",
+    # "itc99/b12.aig",
+    # "itc99/b13.aig",
+    # "itc99/b14.aig",
+    # "iscas89/s1196.aig",
+    # "iscas89/s1238.aig",
     "iscas89/s13207.aig",
-    "iscas89/s1423.aig",
-    "iscas89/s1488.aig",
-    "iscas89/s15850.aig",
-    "iscas89/s27.aig",
-    "iscas89/s298.aig",
-    "iscas89/s344.aig",
-    "iscas89/s349.aig",
-    "iscas89/s35932.aig",
-    "iscas89/s382.aig",
-    "iscas89/s386.aig",
-    "iscas89/s38417.aig",
-    "iscas89/s400.aig",
-    "iscas89/s420.aig",
-    "iscas89/s444.aig",
-    "iscas89/s510.aig",
-    "iscas89/s526.aig",
+    # "iscas89/s1423.aig",
+    # "iscas89/s1488.aig",
+    # "iscas89/s15850.aig",
+    # "iscas89/s27.aig",
+    # "iscas89/s298.aig",
+    # "iscas89/s344.aig",
+    # "iscas89/s349.aig",
+    # "iscas89/s35932.aig",
+    # "iscas89/s382.aig",
+    # "iscas89/s386.aig",
+    # "iscas89/s38417.aig",
+    # "iscas89/s400.aig",
+    # "iscas89/s420.aig",
+    # "iscas89/s444.aig",
+    # "iscas89/s510.aig",
+    # "iscas89/s526.aig",
     "iscas89/s5378.aig",
-    "iscas89/s641.aig",
-    "iscas89/s713.aig",
-    "iscas89/s820.aig",
-    "iscas89/s832.aig",
-    "iscas89/s838.aig",
+    # "iscas89/s641.aig",
+    # "iscas89/s713.aig",
+    # "iscas89/s820.aig",
+    # "iscas89/s832.aig",
+    # "iscas89/s838.aig",
     "iscas89/s9234.aig",
-    "iscas89/s953.aig",
-    "iscas89/s38584.aig",
-    "itc99/b15.aig",
-    "itc99/b17.aig",
-    "itc99/b18.aig",
-    "itc99/b19.aig",
-    "itc99/b20.aig",
-    "itc99/b21.aig",
-    "itc99/b22.aig",
+    # "iscas89/s953.aig",
+    # "iscas89/s38584.aig",
+    # "itc99/b15.aig",
+    # "itc99/b17.aig",
+    # "itc99/b18.aig",
+    # "itc99/b19.aig",
+    # "itc99/b20.aig",
+    # "itc99/b21.aig",
+    # "itc99/b22.aig",
 ]
 
 BENCHMARK_DIR = os.path.join(ROOT_DIR, "benchmarks")
@@ -94,26 +96,27 @@ LOG_DIR = os.path.join(SCRIPT_DIR, "log")
 EXP_DIR = os.path.join(SCRIPT_DIR, "exp")
 
 ABC_BINARY = os.path.join(ROOT_DIR, "abc")
-TIMEOUT_SEC = 2000
+TIMEOUT_SEC = 400
 
 K = 0
-SEEDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-RANDOM_SIM_CYCLE = 1800
+# SEEDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+SEEDS = [0, 1, 2, 3, 49]
+RANDOM_SIM_CYCLE = 100
 REFINE_MODE = 1
 REFINE_BIND_DC = True
 REFINE_CONF_LIMIT = 10000
 REFINE_CORE_ONLY = False
 OTHER_ARGS = ""
 OPTIMIZE_MODE = 1
-DC_RATIO = [0, 25, 50, 75]
-TOTAL_TIMEOUT = 600
+DC_RATIO = [0]
+TOTAL_TIMEOUT = 200
 
 # 預設 8；可用 MINR_EXP_WORKERS 或命令列第二參數覆寫
 def _default_max_workers() -> int:
     w = os.environ.get("MINR_EXP_WORKERS", "").strip()
     if w.isdigit():
         return max(1, int(w))
-    return 24
+    return 4
 
 
 MAX_WORKERS = _default_max_workers()
@@ -205,12 +208,31 @@ def main():
         param_str = "_".join(parts)
         return os.path.join(EXP_DIR, f"{prefix}{date_str}_{time_str}_{param_str}.csv")
 
-    prefix_base = sys.argv[1].strip() if len(sys.argv) > 1 and sys.argv[1].strip() else "exp"
-    prefix_base = re.sub(r"[^\w\-]", "_", prefix_base)
+    ap = argparse.ArgumentParser(
+        description="Parallel minr experiment runner. Optionally rerun timeout cases from an existing CSV."
+    )
+    ap.add_argument(
+        "--prefix",
+        default="exp",
+        help="Output filename prefix (default: exp)",
+    )
+    ap.add_argument(
+        "--csv",
+        default="",
+        help="If set, do NOT use BENCHMARKS/SEEDS/DC_RATIO grid; instead rerun only timeout rows in this CSV.",
+    )
+    ap.add_argument(
+        "--max-workers",
+        type=int,
+        default=0,
+        help="Override max parallel workers (default: env MINR_EXP_WORKERS or script default).",
+    )
+    args = ap.parse_args()
 
-    max_workers = MAX_WORKERS
-    if len(sys.argv) > 2 and sys.argv[2].strip().isdigit():
-        max_workers = max(1, int(sys.argv[2].strip()))
+    prefix_base = (args.prefix or "exp").strip()
+    prefix_base = re.sub(r"[^\w\-]", "_", prefix_base) if prefix_base else "exp"
+
+    max_workers = MAX_WORKERS if not args.max_workers else max(1, int(args.max_workers))
 
     detail_csv = build_csv_path(f"{prefix_base}_parallel_detail_")
 
@@ -219,7 +241,7 @@ def main():
         stem, _ext = os.path.splitext(base)
         return stem
 
-    headers = [
+    default_headers = [
         "circuit",
         "inputs",
         "outputs",
@@ -248,7 +270,81 @@ def main():
         "sim_reg_mismatch_strong",
     ]
 
-    jobs = [(b, s, d) for b in BENCHMARKS for s in SEEDS for d in DC_RATIO]
+    def _is_na(v: object) -> bool:
+        if v is None:
+            return True
+        s = str(v).strip()
+        if s == "":
+            return True
+        u = s.upper()
+        return u == "NA" or u == "N/A"
+
+    def _is_timeout_row(row: dict) -> bool:
+        """
+        依使用者約定：timeout 列除了 circuit/dc_ratio/seed 之外，其餘欄位皆為 NA。
+        這邊用「所有其他欄位皆 NA」來判定。
+        """
+        keep = {"circuit", "dc_ratio", "seed"}
+        for k, v in row.items():
+            if k in keep:
+                continue
+            if not _is_na(v):
+                return False
+        return True
+
+    def _resolve_bench_path(circuit_field: str) -> str:
+        """
+        CSV 的 circuit 欄位通常是 stem（例如 s13207 / b12）。
+        這裡把它解析回 BENCHMARK_DIR 底下的相對路徑（例如 iscas89/s13207.aig）。
+        """
+        c = (circuit_field or "").strip()
+        if not c:
+            return ""
+        # 若已是相對路徑或檔名
+        if "/" in c or c.endswith(".aig"):
+            return c
+        # 優先在 BENCHMARKS 列表用 stem 對應（避免猜錯資料集）
+        matches = [b for b in BENCHMARKS if bench_stem(b) == c]
+        if len(matches) == 1:
+            return matches[0]
+        # 再嘗試常見資料夾
+        cand = os.path.join("iscas89", f"{c}.aig")
+        if os.path.exists(os.path.join(BENCHMARK_DIR, cand)):
+            return cand
+        cand = os.path.join("itc99", f"{c}.aig")
+        if os.path.exists(os.path.join(BENCHMARK_DIR, cand)):
+            return cand
+        return c
+
+    # 先決定輸出欄位順序（csv 模式用原檔 header；否則用預設）
+    input_rows_to_copy = []
+    jobs = []
+    output_headers = list(default_headers)
+    if args.csv:
+        with open(args.csv, newline="", encoding="utf-8") as f:
+            r = csv.DictReader(f)
+            if r.fieldnames:
+                output_headers = list(r.fieldnames)
+            for row in r:
+                if _is_timeout_row(row):
+                    circuit = (row.get("circuit") or "").strip()
+                    dc_ratio = (row.get("dc_ratio") or "").strip()
+                    seed = (row.get("seed") or "").strip()
+                    if not circuit or _is_na(dc_ratio) or _is_na(seed):
+                        continue
+                    try:
+                        dci = int(float(dc_ratio))
+                        si = int(float(seed))
+                    except Exception:
+                        continue
+                    bench_rel = _resolve_bench_path(circuit)
+                    if bench_rel:
+                        jobs.append((bench_rel, si, dci))
+                else:
+                    input_rows_to_copy.append(row)
+    else:
+        jobs = [(b, s, d) for b in BENCHMARKS for s in SEEDS for d in DC_RATIO]
+
     n_jobs = len(jobs)
     progress_lock = threading.Lock()
     run_state = {"active": 0, "done": 0}
@@ -359,7 +455,7 @@ def main():
                         if match:
                             parsed[key] = match.group(1)
 
-            out = {h: "NA" for h in headers}
+            out = {h: "NA" for h in output_headers}
             out["circuit"] = stem
             out["dc_ratio"] = str(dc_pct)
             out["seed"] = str(seed)
@@ -400,13 +496,21 @@ def main():
 
     print(f"Parallel detail CSV: {detail_csv}")
     print(f"Jobs: {n_jobs}, max_workers: {max_workers}")
+    if args.csv:
+        print(f"CSV rerun mode: {args.csv}")
+        print(f"Copy-through rows (non-timeout): {len(input_rows_to_copy)}")
 
     write_lock = threading.Lock()
     interrupted = False
 
     with open(detail_csv, "w", newline="", encoding="utf-8") as detail_f:
-        detail_writer = csv.DictWriter(detail_f, fieldnames=headers)
+        detail_writer = csv.DictWriter(detail_f, fieldnames=output_headers)
         detail_writer.writeheader()
+        # 先把原本「非 timeout」列原封不動寫入
+        if input_rows_to_copy:
+            for row in input_rows_to_copy:
+                out_row = {h: row.get(h, "NA") for h in output_headers}
+                detail_writer.writerow(out_row)
         detail_f.flush()
         os.fsync(detail_f.fileno())
 
