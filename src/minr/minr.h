@@ -51,6 +51,7 @@ struct Minr_Man_t_
     int         nDontCarePercent; // -D <1..99>: % of target registers set to don't care
     int         nOptimizeDenseKMax; // -K N with -O 1: dense sweep inclusive end; -1 = geometric schedule
     int         nOptimizeDenseKMin; // with -K: dense sweep start from -k (CLI default 0 if -k omitted)
+    int         fDebugNoPropCut;   // -p: debug: cut diagnosis mode (see minr_core.cpp)
 
     // Internal State
     Vec_Int_t * vVarMap;    // Mapping: (ObjId, Frame) -> SatVar (Base)
@@ -129,7 +130,7 @@ struct Minr_Man_t_
 
 extern void Minr_ExtractCut( Minr_Man_t * p );
 extern void Minr_ExtractEqCut( Minr_Man_t * p );
-extern void Minr_Solve( Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin );
+extern void Minr_Solve( Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin, int fDebugNoPropCut );
 extern void Minr_SolveOptimize( Minr_Man_t * p );
 extern void Minr_SolveOptimize2( Minr_Man_t * p );
 

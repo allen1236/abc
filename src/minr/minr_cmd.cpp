@@ -43,9 +43,10 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
     int nDontCarePercent = 0;   // -D <1..99> don't care percentage (requires -r)
     int nOptimizeDenseKMax = -1; // -K N: with -O 1, dense sweep up to N; default -1 = geometric
     int nOptimizeDenseKMin = 0;  // with -K: start k from -k (set below), else 0
+    int fDebugNoPropCut = 0;     // -p: debug: cut diagnosis mode (do multiple solves)
 
     Extra_UtilGetoptReset();
-    while ((c = Extra_UtilGetopt(argc, argv, "k:I:D:v:r:R:o:t:x:O:c:CXK:h")) != EOF) {
+    while ((c = Extra_UtilGetopt(argc, argv, "k:I:D:v:r:R:o:t:x:O:c:CXK:hp")) != EOF) {
         switch (c) {
             case 'k':
                 if (globalUtilOptarg == NULL || globalUtilOptarg[0] == '\0') {
@@ -108,6 +109,9 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
                 }
                 totalTimeout = atof(globalUtilOptarg);
                 if (totalTimeout < 0) goto usage;
+                break;
+            case 'p':
+                fDebugNoPropCut = 1;
                 break;
             case 'O':
                 if (globalUtilOptarg == NULL || globalUtilOptarg[0] == '\0') {
@@ -253,13 +257,13 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
     }
 
     // Call Minr_Solve function (MaxSAT via IPAMIR .so at MINR_IPAMIR_SO_DEFAULT)
-    Minr_Solve(pGia, nFrames, pInitStr, fExplicitInit, fRandTarget, nRandomSim, vLevel, seed, nRefineMode, fRefineBindDc, nRefineConfLimit, fRefineCoreOnly, pReportFile, nOptimizeMode, totalTimeout, nDontCarePercent, nOptimizeDenseKMax, nOptimizeDenseKMin);
+    Minr_Solve(pGia, nFrames, pInitStr, fExplicitInit, fRandTarget, nRandomSim, vLevel, seed, nRefineMode, fRefineBindDc, nRefineConfLimit, fRefineCoreOnly, pReportFile, nOptimizeMode, totalTimeout, nDontCarePercent, nOptimizeDenseKMax, nOptimizeDenseKMin, fDebugNoPropCut);
 
     if (pInitStrAlloc) free(pInitStrAlloc);
     return 0;
 
 usage:
-    Abc_Print(-2, "usage: &minr [-k <int>] [-I <string>] [-r [<seed>]] [-R <num>] [-D <pct>] [-o <file>] [-v <level>] [-t <sec>] [-x <mode>] [-c <nConf>] [-C] [-O <mode>] [-K <N>]\n");
+    Abc_Print(-2, "usage: &minr [-k <int>] [-I <string>] [-r [<seed>]] [-R <num>] [-D <pct>] [-o <file>] [-v <level>] [-t <sec>] [-x <mode>] [-c <nConf>] [-C] [-O <mode>] [-K <N>] [-p]\n");
     Abc_Print(-2, "\t-k <int>    : timeframe expansion depth (t=0..k), k=0 means single frame\n");
     Abc_Print(-2, "\t-I <string> : initial value for latches (0,1,x); default all 0; length = nRegs\n");
     Abc_Print(-2, "\t-r [<seed>] : derive target reset by random simulation (optional seed)\n");
@@ -274,6 +278,7 @@ usage:
     Abc_Print(-2, "\t-C          : core-only refine (skip trial release; do one UNSAT-core release)\n");
     Abc_Print(-2, "\t-O <mode>   : optimize mode (1=sweep k, 2=outer-loop); argument required\n");
     Abc_Print(-2, "\t-K <N>      : with -O 1 only: dense sweep from -k (default 0) through N; omit -k to start at 0\n");
+    Abc_Print(-2, "\t-p          : debug: cut diagnosis mode (multiple solves with cut buckets; printed to terminal)\n");
     Abc_Print(-2, "\t-h          : print the command usage\n");
     return 1;
 }

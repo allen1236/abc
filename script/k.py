@@ -34,13 +34,13 @@ _PY39 = sys.version_info >= (3, 9)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BENCHMARKS = [
-    # "iscas89/s35932.aig",
+    "iscas89/s35932.aig",
     "iscas89/s9234.aig",
-    # "iscas89/s15850.aig",
-    # "iscas89/s13207.aig",
-    # "itc99/b12.aig",
-    # "itc99/b14.aig",
-    # "itc99/b20.aig",
+    "iscas89/s15850.aig",
+    "iscas89/s13207.aig",
+    "itc99/b12.aig",
+    "itc99/b14.aig",
+    "itc99/b20.aig",
 ]
 
 BENCHMARK_DIR = os.path.join(ROOT_DIR, "benchmarks")
@@ -50,8 +50,8 @@ EXP_DIR = os.path.join(SCRIPT_DIR, "exp")
 
 ABC_BINARY = os.path.join(ROOT_DIR, "abc")
 # 傳給 &minr 的 -t（thread-CPU 秒）；外層 subprocess.wait 會多等 PROC_WAIT_EXTRA_SEC
-TOTAL_TIMEOUT = 600
-PROC_WAIT_EXTRA_SEC = 30
+TOTAL_TIMEOUT = 800
+PROC_WAIT_EXTRA_SEC = 200
 
 K_MIN = 0  # 掃描 k 下限（含）
 K_MAX = 40  # 掃描 k 上限（含）；每個 k 各跑一次 single-k solve
@@ -143,6 +143,36 @@ def merge_job_results(job_results: list, headers: list, k_min: int, k_max: int) 
     return sorted(buckets.values(), key=lambda x: (x["circuit"], x["dc_ratio"], x["seed"]))
 
 
+def _parse_resume_arg(argv: list) -> str:
+    """
+    支援：
+      --resume_pivot /path/to/k_pivot.csv
+      --resume_pivot=/path/to/k_pivot.csv
+    """
+    for i, a in enumerate(argv):
+        if a == "--resume_pivot" and i + 1 < len(argv):
+            return argv[i + 1].strip()
+        if a.startswith("--resume_pivot="):
+            return a.split("=", 1)[1].strip()
+    return ""
+
+
+def _stem_to_bench_path(stem: str) -> str:
+    for b in BENCHMARKS:
+        if os.path.splitext(os.path.basename(b))[0] == stem:
+            return b
+    return ""
+
+
+def _safe_float_str(x: str) -> str:
+    if x is None:
+        return "NA"
+    s = str(x).strip()
+    if not s or s.upper() in ("NA", "N/A"):
+        return "NA"
+    return s
+
+
 def parse_iterations_block(content: str):
     """Parse [iterations] lines into { k: {reset, runtime_sec} }（reset = 該 k 的 required_reset）。"""
     out = {}
@@ -215,6 +245,9 @@ def parse_flat_report_for_k(content: str, expect_k: int):
     if not m_res:
         return None
     block = m_res.group(1)
+    st = re.search(r"(?m)^solver_status\s*=\s*(\S+)", block)
+    if not st or st.group(1).strip().lower() != "optimum":
+        return None
     rr = re.search(r"(?m)^required_reset\s*=\s*(\S+)", block)
     rt = re.search(r"(?m)^runtime_sec\s*=\s*([\d.]+)", block)
     if not rr or not rt:
@@ -377,13 +410,16 @@ def main():
             out.append(row)
         return out
 
-    jobs = [
-        (b, s, d, kk)
-        for b in BENCHMARKS
-        for s in SEEDS
-        for d in DC_RATIO
-        for kk in range(K_MIN, K_MAX + 1)
-    ]
+    resume_pivot = _parse_resume_arg(sys.argv[1:])
+    jobs = []
+    if not resume_pivot:
+        jobs = [
+            (b, s, d, kk)
+            for b in BENCHMARKS
+            for s in SEEDS
+            for d in DC_RATIO
+            for kk in range(K_MIN, K_MAX + 1)
+        ]
     n_jobs = len(jobs)
     progress_lock = threading.Lock()
     run_state = {"active": 0, "done": 0}
@@ -516,6 +552,8 @@ def main():
 
     print(f"k.py detail CSV: {detail_csv}")
     print(f"k.py pivot CSV: {pivot_csv}")
+    if resume_pivot:
+        print(f"Resume pivot: {resume_pivot}")
     print(f"Jobs: {n_jobs}, max_workers: {max_workers}")
 
     all_rows = []
@@ -537,6 +575,136 @@ def main():
             for prow in pivot_rows:
                 pivot_writer.writerow(prow)
 
+    # --- Resume mode: read a pivot CSV and fill NA cells by rerunning only missing cases ---
+    if resume_pivot:
+        with open(resume_pivot, newline="", encoding="utf-8") as f:
+            r = csv.DictReader(f)
+            pivot_in_rows = list(r)
+            pivot_in_fields = list(r.fieldnames or [])
+
+        # infer which stems and specified ratios (Sxx) exist in the pivot
+        col_re = re.compile(r"^(?P<stem>.+)_(?P<metric>rt|rf|rs)_S(?P<s>\d+)$")
+        stems = []
+        stem_set = set()
+        s_values = set()
+        for c in pivot_in_fields:
+            m = col_re.match(c)
+            if not m:
+                continue
+            st = m.group("stem")
+            if st not in stem_set:
+                stem_set.add(st)
+                stems.append(st)
+            s_values.add(int(m.group("s")))
+        # map Sxx -> dc_ratio (dontcare_pct)
+        dc_list = sorted({100 - s for s in s_values})
+
+        # discover missing (k, stem, dc)
+        missing = []
+        for row in pivot_in_rows:
+            k_s = row.get("k", "").strip()
+            if not k_s.isdigit():
+                continue
+            kk = int(k_s)
+            for st in stems:
+                for dc in dc_list:
+                    s = dc_ratio_to_s_label(dc)
+                    rt = _safe_float_str(row.get(f"{st}_rt_S{s}"))
+                    rf = _safe_float_str(row.get(f"{st}_rf_S{s}"))
+                    rs = _safe_float_str(row.get(f"{st}_rs_S{s}"))
+                    if rt == "NA" or rf == "NA" or rs == "NA":
+                        missing.append((st, dc, kk))
+
+        # de-dup
+        missing = sorted(set(missing))
+        print(f"Resume: missing cells needing rerun = {len(missing)}")
+        if not missing:
+            patched = resume_pivot + ".patched.csv"
+            with open(patched, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=pivot_in_fields)
+                w.writeheader()
+                w.writerows(pivot_in_rows)
+            print(f"Resume: nothing to run. Patched pivot saved to {patched}")
+            return
+
+        # create rerun jobs using current BENCHMARKS mapping; reuse SEEDS[0] (pivot doesn't encode seed)
+        seed = SEEDS[0] if SEEDS else 0
+        rerun_jobs = []
+        for st, dc, kk in missing:
+            b = _stem_to_bench_path(st)
+            if not b:
+                print(f"[resume][skip] stem not in BENCHMARKS: {st}")
+                continue
+            rerun_jobs.append((b, seed, dc, kk))
+        print(f"Resume: rerun jobs = {len(rerun_jobs)} (seed={seed})")
+
+        job_results = []
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        try:
+            future_map = {
+                executor.submit(run_one_job, b, seed, dc, kk): (b, dc, kk)
+                for b, seed, dc, kk in rerun_jobs
+            }
+            for fut in as_completed(future_map):
+                try:
+                    job_results.append(fut.result())
+                except CancelledError:
+                    continue
+        except KeyboardInterrupt:
+            interrupted = True
+            print("\n[Interrupt] 正在停止所有 abc 子程序與未開始的 job …", flush=True)
+            terminate_all_abc_children()
+            if _PY39:
+                executor.shutdown(wait=False, cancel_futures=True)
+            else:
+                executor.shutdown(wait=False)
+        finally:
+            if not interrupted:
+                executor.shutdown(wait=True)
+
+        # patch pivot rows in-memory using rerun results
+        res_map = {(jr["circuit"], int(jr["dc_ratio"]), int(jr["kk"])): jr for jr in job_results}
+        for row in pivot_in_rows:
+            k_s = row.get("k", "").strip()
+            if not k_s.isdigit():
+                continue
+            kk = int(k_s)
+            for st in stems:
+                for dc in dc_list:
+                    key = (st, int(dc), kk)
+                    if key not in res_map:
+                        continue
+                    jr = res_map[key]
+                    s = dc_ratio_to_s_label(dc)
+                    reset = jr.get("k_reset", "NA")
+                    rt = jr.get("k_runtime_sec", "NA")
+                    ff = jr.get("ff", "NA")
+                    spec = jr.get("specified", "NA")
+                    row[f"{st}_rt_S{s}"] = rt
+                    row[f"{st}_rf_S{s}"] = r_f_from_reset_and_ff(reset, ff)
+                    row[f"{st}_rs_S{s}"] = r_s_from_reset_and_specified(reset, spec)
+
+        patched = resume_pivot + ".patched.csv"
+        with open(patched, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=pivot_in_fields)
+            w.writeheader()
+            w.writerows(pivot_in_rows)
+        print(f"Resume: patched pivot saved to {patched}")
+
+        # also dump rerun detail (only rerun jobs) for inspection
+        rerun_detail = resume_pivot + ".rerun_detail.csv"
+        rerun_wide = merge_job_results(job_results, headers, K_MIN, K_MAX)
+        with open(rerun_detail, "w", newline="", encoding="utf-8") as f:
+            dw = csv.DictWriter(f, fieldnames=headers)
+            dw.writeheader()
+            dw.writerows(rerun_wide)
+        print(f"Resume: rerun detail saved to {rerun_detail}")
+
+        if interrupted:
+            sys.exit(130)
+        return
+
+    # --- Normal mode: run full grid ---
     job_results = []
     executor = ThreadPoolExecutor(max_workers=max_workers)
     try:

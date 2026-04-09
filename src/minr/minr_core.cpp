@@ -33,7 +33,14 @@ static inline abctime Minr_CpuTicks() { return Abc_ThreadClock(); }
 static inline int Minr_GetVar(Minr_Man_t * p, int ObjId, int Frame) {
     if (p->vFrameVarBase)
         return Vec_IntEntry(p->vFrameVarBase, Frame) + 2 * ObjId;
-    return Vec_IntEntry(p->vVarMap, ObjId * (p->nFrames + 1) + Frame);
+    int v = Vec_IntEntry(p->vVarMap, ObjId * (p->nFrames + 1) + Frame);
+    if (p->vLevel >= 2 && v == 0) {
+        Abc_Print(-1, "[Minr][BUG] Missing SAT var mapping: ObjId=%d Frame=%d (nFrames=%d). "
+                      "This indicates a TFI/alloc mismatch.\n",
+                  ObjId, Frame, p->nFrames);
+        assert(v != 0);
+    }
+    return v;
 }
 static inline int Lit_T(Minr_Man_t * p, int ObjId, int Frame) { return Abc_Var2Lit(Minr_GetVar(p, ObjId, Frame), 0); }
 static inline int Lit_F(Minr_Man_t * p, int ObjId, int Frame) { return Abc_Var2Lit(Minr_GetVar(p, ObjId, Frame) + 1, 0); }
@@ -71,6 +78,7 @@ static inline int Minr_RandomBinary( void )
 
 // Forward declaration (used by helpers below)
 void Minr_SimulateTimeframe(Gia_Man_t * pGia, Vec_Int_t * vObjVals);
+void Minr_DecodeResult(Minr_Man_t * p, Vec_Int_t * vModel);
 
 // Derive target reset string by multi-frame random simulation.
 // If nFramesToSim == 0: directly generate random state (no simulation)
@@ -86,6 +94,35 @@ static char * Minr_DeriveTargetResetByRandomSim( Gia_Man_t * pGia, char * pRoIni
     Vec_Int_t * vCurrentState = Vec_IntAlloc(nRegs);
     Gia_Obj_t * pObj;
     int iObj, k, t;
+
+    if ( vLevel >= 2 )
+    {
+        Abc_Print( 1, "[Rand][LatchMap] nRegs=%d\n", nRegs );
+        for ( int i = 0; i < nRegs; i++ )
+        {
+            Gia_Obj_t * pRo = Gia_ManRo( pGia, i );
+            Gia_Obj_t * pRi = Gia_ManRi( pGia, i );
+            Abc_Print( 1, "  L[%d]: RO_ObjId=%d  RI_ObjId=%d\n",
+                       i,
+                       Gia_ObjId( pGia, pRo ),
+                       Gia_ObjId( pGia, pRi ) );
+        }
+        Abc_Print( 1, "[Rand][LatchMap] Enum order sanity (first 8)\n" );
+        {
+            int j = 0;
+            Gia_ManForEachRo( pGia, pObj, iObj )
+            {
+                Abc_Print( 1, "    ForEachRo[%d]: ObjId=%d\n", j, Gia_ObjId( pGia, pObj ) );
+                if ( ++j >= 8 ) break;
+            }
+            j = 0;
+            Gia_ManForEachRi( pGia, pObj, iObj )
+            {
+                Abc_Print( 1, "    ForEachRi[%d]: ObjId=%d\n", j, Gia_ObjId( pGia, pObj ) );
+                if ( ++j >= 8 ) break;
+            }
+        }
+    }
 
     Minr_RandomSeedStreamFromUserSeed( seed );
 
@@ -638,6 +675,7 @@ static Vec_Int_t * Minr_CallSolverIpamir( Minr_Man_t * p, Vec_Wec_t * vHardClaus
 
     if ( st == 20 )
     {
+        printf("[Minr] Solver returned UNSAT.\n");
         p->solverStatus = 2;
         Api.ipamir_release( s );
         Minr_IpamirApiUnload( &Api );
@@ -665,6 +703,246 @@ static Vec_Int_t * Minr_CallSolverIpamir( Minr_Man_t * p, Vec_Wec_t * vHardClaus
     Api.ipamir_release( s );
     Minr_IpamirApiUnload( &Api );
     return vModel;
+}
+
+// -p debug mode: solve multiple times with different cut buckets.
+// This is for diagnosis only; normal runs are unaffected.
+static void Minr_DebugSolveCutBuckets( Minr_Man_t * p, Vec_Int_t * vSoftLits, double timeoutSec )
+{
+    Gia_Man_t * pGia = p->pGia;
+    int kFrame = p->nFrames;
+
+    Vec_Int_t * vCutPO  = Vec_IntAlloc(256);
+    Vec_Int_t * vCutRI  = Vec_IntAlloc(256);
+    Vec_Int_t * vCutAnd = Vec_IntAlloc(256);
+
+    // Bucket constant cut nodes by type (store NodeId; value read from vPropVals later)
+    {
+        int ci, NodeId;
+        Vec_IntForEachEntry(p->vCutNodes, NodeId, ci) {
+            int Val = Vec_IntEntry(p->vPropVals, NodeId);
+            if (Val == MINR_VAL_X) continue;
+            Gia_Obj_t * pObj = Gia_ManObj(pGia, NodeId);
+            if (Gia_ObjIsPo(pGia, pObj)) Vec_IntPush(vCutPO, NodeId);
+            else if (Gia_ObjIsRi(pGia, pObj)) Vec_IntPush(vCutRI, NodeId);
+            else Vec_IntPush(vCutAnd, NodeId);
+        }
+    }
+
+    auto AddFixed01 = [&]( Vec_Wec_t * vH, int ObjId, int Frame, int Val ) {
+        int lit_T = Lit_T(p, ObjId, Frame);
+        int lit_F = Lit_F(p, ObjId, Frame);
+        if (Val == MINR_VAL_0) {
+            Vec_Int_t * c = Vec_WecPushLevel(vH); Vec_IntPush(c, Abc_LitNot(lit_T));
+            c = Vec_WecPushLevel(vH); Vec_IntPush(c, lit_F);
+        } else {
+            Vec_Int_t * c = Vec_WecPushLevel(vH); Vec_IntPush(c, lit_T);
+            c = Vec_WecPushLevel(vH); Vec_IntPush(c, Abc_LitNot(lit_F));
+        }
+    };
+
+    auto DebugSimValueAtTk = [&]( int ObjIdToProbe ) -> int {
+        // Simulate using decoded regs_only solution (p->vRoVals0, p->vPiVals).
+        // Returns MINR_VAL_0/1/X; prints a short line.
+        int nRegs = Gia_ManRegNum(pGia);
+        Vec_Int_t * vCurrentState = Vec_IntAlloc(nRegs);
+        Vec_Int_t * vObjVals = Vec_IntStart(Gia_ManObjNum(pGia));
+        Gia_Obj_t * pObj;
+        int iObj;
+
+        if (!p->vRoVals0) {
+            printf("[Debug -p] sim@tk: missing vRoVals0\n");
+            Vec_IntFree(vCurrentState);
+            Vec_IntFree(vObjVals);
+            return MINR_VAL_X;
+        }
+        // initial state from decoded t=0 RO values
+        Vec_IntAppend(vCurrentState, p->vRoVals0);
+
+        for (int t = 0; t <= kFrame; t++) {
+            // PIs
+            if (t < kFrame) {
+                if (p->vPiVals) {
+                    int iPi, nPi = Gia_ManPiNum(pGia);
+                    Gia_ManForEachPi(pGia, pObj, iPi) {
+                        int pid = Gia_ObjId(pGia, pObj);
+                        int Val = Vec_IntEntry(p->vPiVals, t * nPi + iPi) ? MINR_VAL_1 : MINR_VAL_0;
+                        Vec_IntWriteEntry(vObjVals, pid, Val);
+                    }
+                } else {
+                    // If PI sequence not decoded, fall back to X
+                    Gia_ManForEachPi(pGia, pObj, iObj)
+                        Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pObj), MINR_VAL_X);
+                }
+            } else {
+                // t == k: PIs treated as X in verify semantics
+                Gia_ManForEachPi(pGia, pObj, iObj)
+                    Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pObj), MINR_VAL_X);
+            }
+
+            // ROs from current state
+            int kk = 0;
+            Gia_ManForEachRo(pGia, pObj, iObj)
+                Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pObj), Vec_IntEntry(vCurrentState, kk++));
+
+            // simulate one timeframe
+            Minr_SimulateTimeframe(pGia, vObjVals);
+
+            if (t == kFrame)
+                break;
+
+            // next state from RIs
+            kk = 0;
+            Gia_ManForEachRi(pGia, pObj, iObj)
+                Vec_IntWriteEntry(vCurrentState, kk++, Vec_IntEntry(vObjVals, Gia_ObjId(pGia, pObj)));
+        }
+
+        int Val = Vec_IntEntry(vObjVals, ObjIdToProbe);
+        const char * pS = (Val == MINR_VAL_0) ? "0" : (Val == MINR_VAL_1) ? "1" : "X";
+        printf("[Debug -p] sim@t=%d: ObjId=%d Val=%s\n", kFrame, ObjIdToProbe, pS);
+        Vec_IntFree(vCurrentState);
+        Vec_IntFree(vObjVals);
+        return Val;
+    };
+
+    auto RunOne = [&]( const char * pTag, Vec_Int_t * vBucket ) -> int {
+        // Reset per-solve decoded fields
+        if (p->vPiVals)  { Vec_IntFree(p->vPiVals);  p->vPiVals  = NULL; }
+        if (p->vRoVals0) { Vec_IntFree(p->vRoVals0); p->vRoVals0 = NULL; }
+        p->solverStatus = 0;
+        p->timeSolver = 0;
+
+        // Copy base hard clauses
+        Vec_Wec_t * vHard = Vec_WecAlloc( Vec_WecSize(p->vClauses) + 1024 );
+        Vec_Int_t * vC; int lvl;
+        Vec_WecForEachLevel( p->vClauses, vC, lvl ) {
+            Vec_Int_t * dst = Vec_WecPushLevel(vHard);
+            Vec_IntAppend(dst, vC);
+        }
+
+        // Always constrain specified registers @ t=k (from pInitStr)
+        {
+            int ri = 0;
+            Gia_Obj_t * pRo;
+            Gia_ManForEachRo(pGia, pRo, ri) {
+                char c = p->pInitStr[ri];
+                if (c != '0' && c != '1') continue;
+                AddFixed01(vHard, Gia_ObjId(pGia, pRo), kFrame, (c == '0') ? MINR_VAL_0 : MINR_VAL_1);
+            }
+        }
+
+        // Add this bucket's cut constraints @ t=k
+        if (vBucket) {
+            int NodeId, i;
+            Vec_IntForEachEntry(vBucket, NodeId, i) {
+                int Val = Vec_IntEntry(p->vPropVals, NodeId);
+                if (Val == MINR_VAL_0 || Val == MINR_VAL_1)
+                    AddFixed01(vHard, NodeId, kFrame, Val);
+            }
+        }
+
+        Vec_Int_t * vModel = Minr_CallSolverIpamir( p, vHard, vSoftLits, MINR_IPAMIR_SO_DEFAULT, timeoutSec );
+        Vec_WecFree(vHard);
+
+        if (!vModel) {
+            const char * st = (p->solverStatus == 2) ? "UNSAT" : (p->solverStatus == 4) ? "TIMEOUT" : "ERROR";
+            printf("[Debug -p] %s: %s\n", pTag, st);
+            return p->solverStatus;
+        }
+
+        Minr_DecodeResult(p, vModel);
+        Vec_IntFree(vModel);
+
+        int nResets = 0, val0, idx;
+        if (p->vRoVals0) {
+            Vec_IntForEachEntry(p->vRoVals0, val0, idx)
+                if (val0 == MINR_VAL_0 || val0 == MINR_VAL_1) nResets++;
+        }
+        printf("[Debug -p] %s: SAT resets=%d, solver=%.2fs\n",
+               pTag, nResets, (double)p->timeSolver / CLOCKS_PER_SEC);
+
+        // Extra probe: for regs_only, simulate and report the problematic PO at t=k
+        if (!strcmp(pTag, "regs_only")) {
+            int probed = 1085; // b12: known UNSAT single PO constraint
+            int propVal = (p->vPropVals && probed < Vec_IntSize(p->vPropVals)) ? Vec_IntEntry(p->vPropVals, probed) : MINR_VAL_X;
+            const char * pProp = (propVal == MINR_VAL_0) ? "0" : (propVal == MINR_VAL_1) ? "1" : "X";
+            printf("[Debug -p] propagate (PI=X, RO=target): ObjId=%d Val=%s\n", probed, pProp);
+            DebugSimValueAtTk(probed);
+        }
+        return 1;
+    };
+
+    printf("[Debug -p] Cut diagnosis (batch hard clauses): timeout=%.1fs; all runs include specified regs@t=k.\n", timeoutSec);
+    int stRegs = RunOne("regs_only", NULL);
+    int stPO   = RunOne("regs + cut_PO", vCutPO);
+    int stRI   = RunOne("regs + cut_RI", vCutRI);
+    int stAnd  = RunOne("regs + cut_AND", vCutAnd);
+
+    // If PO bucket is UNSAT, shrink to a minimal UNSAT subset (binary split), then one-by-one.
+    if (stRegs == 1 && stPO == 2 && Vec_IntSize(vCutPO) > 0) {
+        printf("[Debug -p] Shrinking UNSAT cut_PO (n=%d)...\n", Vec_IntSize(vCutPO));
+        Vec_Int_t * vCur = Vec_IntDup(vCutPO);
+
+        // Binary split shrink: keep the UNSAT half until small.
+        while (Vec_IntSize(vCur) > 8) {
+            int n = Vec_IntSize(vCur);
+            int mid = n / 2;
+            Vec_Int_t * vA = Vec_IntAlloc(mid);
+            Vec_Int_t * vB = Vec_IntAlloc(n - mid);
+            for (int i = 0; i < mid; i++) Vec_IntPush(vA, Vec_IntEntry(vCur, i));
+            for (int i = mid; i < n; i++) Vec_IntPush(vB, Vec_IntEntry(vCur, i));
+
+            int stA = RunOne("shrink_PO_halfA", vA);
+            if (stA == 2) {
+                Vec_IntFree(vCur);
+                vCur = vA;
+                Vec_IntFree(vB);
+                continue;
+            }
+            int stB = RunOne("shrink_PO_halfB", vB);
+            if (stB == 2) {
+                Vec_IntFree(vCur);
+                vCur = vB;
+                Vec_IntFree(vA);
+                continue;
+            }
+
+            // Neither half alone UNSAT -> cannot shrink by simple bisection; stop.
+            Vec_IntFree(vA);
+            Vec_IntFree(vB);
+            break;
+        }
+
+        // One-by-one: find a single PO constraint that makes it UNSAT (if any).
+        int foundSingle = 0;
+        for (int i = 0; i < Vec_IntSize(vCur); i++) {
+            int NodeId = Vec_IntEntry(vCur, i);
+            Vec_Int_t * vOne = Vec_IntAlloc(1);
+            Vec_IntPush(vOne, NodeId);
+            int st1 = RunOne("single_PO", vOne);
+            Vec_IntFree(vOne);
+            if (st1 == 2) {
+                int Val = Vec_IntEntry(p->vPropVals, NodeId);
+                printf("[Debug -p] Found UNSAT single PO: ObjId=%d Val=%d\n", NodeId, Val);
+                foundSingle = 1;
+                break;
+            }
+        }
+        if (!foundSingle) {
+            printf("[Debug -p] No single PO alone caused UNSAT after shrinking; remaining n=%d\n", Vec_IntSize(vCur));
+            // Print the remaining small set for inspection.
+            for (int i = 0; i < Vec_IntSize(vCur); i++) {
+                int NodeId = Vec_IntEntry(vCur, i);
+                int Val = Vec_IntEntry(p->vPropVals, NodeId);
+                printf("[Debug -p]  PO[%d]: ObjId=%d Val=%d\n", i, NodeId, Val);
+            }
+        }
+        Vec_IntFree(vCur);
+    }
+
+    Vec_IntFree(vCutPO);
+    Vec_IntFree(vCutRI);
+    Vec_IntFree(vCutAnd);
 }
 
 // Scenario 1: Verify the result by simulation
@@ -994,9 +1272,10 @@ static void Minr_DumpReport(Minr_Man_t * p)
     double solverSec = (double)p->timeSolver / CLOCKS_PER_SEC;
     double refineSec = (double)p->timeRefine / CLOCKS_PER_SEC;
 
-    // Result counts
-    int nResetRequired = 0;
-    if (p->vRoVals0) {
+    // Result counts (only meaningful when a solution exists)
+    int nResetRequired = -1;
+    if (p->solverStatus == 1 && p->vRoVals0) {
+        nResetRequired = 0;
         int val, idx;
         Vec_IntForEachEntry(p->vRoVals0, val, idx)
             if (val == MINR_VAL_0 || val == MINR_VAL_1) nResetRequired++;
@@ -1004,8 +1283,8 @@ static void Minr_DumpReport(Minr_Man_t * p)
     int nSpecRegs = 0;
     for (int ri = 0; ri < nRegs; ri++)
         if (p->pInitStr[ri] == '0' || p->pInitStr[ri] == '1') nSpecRegs++;
-    double rOverF = nRegs > 0 ? 100.0 * nResetRequired / nRegs : 0.0;
-    double rOverS = nSpecRegs > 0 ? 100.0 * (double)nResetRequired / (double)nSpecRegs : -1.0;
+    double rOverF = (nResetRequired >= 0 && nRegs > 0) ? 100.0 * nResetRequired / nRegs : -1.0;
+    double rOverS = (nResetRequired >= 0 && nSpecRegs > 0) ? 100.0 * (double)nResetRequired / (double)nSpecRegs : -1.0;
 
     int nResetBefore = nResetRequired + p->nRefineReleased;
     double rOverFBefore = (p->nRefineMode > 0 && nRegs > 0) ? (100.0 * nResetBefore / nRegs) : -1.0;
@@ -1065,12 +1344,18 @@ static void Minr_DumpReport(Minr_Man_t * p)
     fprintf(pFile, "inputs         = %d\n",    nPI);
     fprintf(pFile, "outputs        = %d\n",    Gia_ManPoNum(pGia));
     fprintf(pFile, "specified_regs = %d\n",    nSpecRegs);
-    fprintf(pFile, "required_reset = %d\n",    nResetRequired);
-    fprintf(pFile, "r_f            = %.2f%%\n", rOverF);
-    if (rOverS >= 0.0)
-        fprintf(pFile, "r_s            = %.2f%%\n", rOverS);
-    else
+    if (nResetRequired >= 0) {
+        fprintf(pFile, "required_reset = %d\n",    nResetRequired);
+        fprintf(pFile, "r_f            = %.2f%%\n", rOverF);
+        if (rOverS >= 0.0)
+            fprintf(pFile, "r_s            = %.2f%%\n", rOverS);
+        else
+            fprintf(pFile, "r_s            = N/A\n");
+    } else {
+        fprintf(pFile, "required_reset = N/A\n");
+        fprintf(pFile, "r_f            = N/A\n");
         fprintf(pFile, "r_s            = N/A\n");
+    }
     if (p->nRefineMode > 0 && rOverFBefore >= 0.0)
         fprintf(pFile, "r_f_before_refine = %.2f%%\n", rOverFBefore);
     else
@@ -1415,8 +1700,10 @@ static int Minr_SolveSingleK(Minr_Man_t * p, double solverTimeout)
     Vec_IntFree(vTfiCut);
     Vec_IntFree(vTfiRi);
 
-    // 3. Cut Constraints at t=k
-    {
+    // 3. Cut constraints at t=k (hard clauses).
+    // In -p diagnosis mode, we DO NOT add cut constraints here — we pass them via
+    // assumptions in Minr_DebugSolveCutBuckets so we can test buckets separately.
+    if (!p->fDebugNoPropCut) {
         int i, NodeId;
         Vec_IntForEachEntry(p->vCutNodes, NodeId, i) {
             int Val = Vec_IntEntry(p->vPropVals, NodeId);
@@ -1446,7 +1733,10 @@ static int Minr_SolveSingleK(Minr_Man_t * p, double solverTimeout)
     }
 
     // 5. MaxSAT (IPAMIR in-process) & decode (PostRelax + Verify are done once in Minr_Solve)
-    {
+    if (p->fDebugNoPropCut) {
+        // -p: diagnosis mode with multiple solves. Use user-requested long timeout.
+        Minr_DebugSolveCutBuckets(p, vSoftLits, 1000.0);
+    } else {
         Vec_Int_t * vModel = Minr_CallSolverIpamir( p, p->vClauses, vSoftLits, MINR_IPAMIR_SO_DEFAULT, solverTimeout );
         if (vModel) {
             Minr_DecodeResult(p, vModel);
@@ -1692,6 +1982,7 @@ static int Minr_SolveSingleKIncr(Minr_Man_t * p, double solverTimeout)
         return -1;
     }
     if (st == 20) {
+        printf("[Minr] Solver returned UNSAT.\n");
         p->solverStatus = 2;
         return -1;
     }
@@ -1805,7 +2096,9 @@ void Minr_SolveOptimize(Minr_Man_t * p)
 
         p->nFrames = curK;
 
-        // Use remaining time as solver timeout (or 0 for unlimited)
+        /* Per-iteration MaxSAT limit is the *remaining* global -t budget (not a fresh T each k).
+         * So the same curK can get a stricter solver cap in a long sweep (e.g. k=0..40) than
+         * in a sweep that starts at curK (e.g. k=19..40), even with identical -r/-R/-D/-t. */
         double solverTimeout = (p->totalTimeout > 0) ? tRemain : 0;
 
         abctime clkIter = Minr_CpuTicks();
@@ -2248,7 +2541,7 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
 #if !defined(ABC_NAMESPACE)
 extern "C"
 #endif
-void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin) {
+void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin, int fDebugNoPropCut) {
     Minr_Man_t Man;
     Minr_Man_t * p = &Man;
     memset(p, 0, sizeof(Minr_Man_t));
@@ -2274,6 +2567,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     p->nDontCarePercent = nDontCarePercent;
     p->nOptimizeDenseKMax = nOptimizeDenseKMax;
     p->nOptimizeDenseKMin = nOptimizeDenseKMin;
+    p->fDebugNoPropCut = fDebugNoPropCut;
 
     // Optional: derive target reset value by random multi-frame simulation (-r)
     // If user didn't explicitly provide -I, pass NULL so random sim starts from random state.
@@ -2319,6 +2613,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     p->timeSolveEnd = 0;
 
     // 0. Pre-processing: Propagation & Cut (shared across all k values)
+    // -p diagnosis mode still needs propagation/cut to build buckets.
     Minr_PropagateAndCut(p);
 
     // Solve phase
