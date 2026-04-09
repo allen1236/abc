@@ -158,13 +158,13 @@ static char * Minr_DeriveTargetResetByRandomSim( Gia_Man_t * pGia, char * pRoIni
     }
 
     // Initialize state: random binary or from pRoInitStr
-    k = 0;
-    Gia_ManForEachRo( pGia, pObj, iObj )
+    for ( int i = 0; i < nRegs; i++ )
     {
+        Gia_Obj_t * pRo = Gia_ManRo( pGia, i );
         int Val;
-        if ( pRoInitStr && k < nRegs )
+        if ( pRoInitStr )
         {
-            char c = pRoInitStr[k];
+            char c = pRoInitStr[i];
             Val = (c == '1') ? MINR_VAL_1 : (c == '0') ? MINR_VAL_0 : MINR_VAL_X;
         }
         else
@@ -172,8 +172,7 @@ static char * Minr_DeriveTargetResetByRandomSim( Gia_Man_t * pGia, char * pRoIni
             Val = Minr_RandomBinary() ? MINR_VAL_1 : MINR_VAL_0;
         }
         Vec_IntPush( vCurrentState, Val );
-        Vec_IntWriteEntry( vObjVals, Gia_ObjId(pGia, pObj), Val );
-        k++;
+        Vec_IntWriteEntry( vObjVals, Gia_ObjId(pGia, pRo ), Val );
     }
 
     // Simulate nFramesToSim timeframes
@@ -184,17 +183,22 @@ static char * Minr_DeriveTargetResetByRandomSim( Gia_Man_t * pGia, char * pRoIni
             Vec_IntWriteEntry( vObjVals, Gia_ObjId(pGia, pObj), Minr_RandomBinary() );
 
         // Set ROs from current state
-        k = 0;
-        Gia_ManForEachRo( pGia, pObj, iObj )
-            Vec_IntWriteEntry( vObjVals, Gia_ObjId(pGia, pObj), Vec_IntEntry(vCurrentState, k++) );
+        for ( int i = 0; i < nRegs; i++ )
+        {
+            Gia_Obj_t * pRo = Gia_ManRo( pGia, i );
+            Vec_IntWriteEntry( vObjVals, Gia_ObjId(pGia, pRo), Vec_IntEntry(vCurrentState, i) );
+        }
 
         // Simulate one timeframe
         Minr_SimulateTimeframe( pGia, vObjVals );
 
         // Update state: collect RIs as next state
         Vec_IntClear( vCurrentState );
-        Gia_ManForEachRi( pGia, pObj, iObj )
-            Vec_IntPush( vCurrentState, Vec_IntEntry(vObjVals, Gia_ObjId(pGia, pObj)) );
+        for ( int i = 0; i < nRegs; i++ )
+        {
+            Gia_Obj_t * pRi = Gia_ManRi( pGia, i );
+            Vec_IntPush( vCurrentState, Vec_IntEntry(vObjVals, Gia_ObjId(pGia, pRi)) );
+        }
     }
 
     // Final state becomes target reset value
@@ -205,11 +209,10 @@ static char * Minr_DeriveTargetResetByRandomSim( Gia_Man_t * pGia, char * pRoIni
         Vec_IntFree( vCurrentState );
         return NULL;
     }
-    k = 0;
-    Vec_IntForEachEntry( vCurrentState, iObj, k )
+    for ( int i = 0; i < nRegs; i++ )
     {
-        int Val = iObj;
-        pTarget[k] = (Val == MINR_VAL_1) ? '1' : (Val == MINR_VAL_0) ? '0' : 'x';
+        int Val = Vec_IntEntry( vCurrentState, i );
+        pTarget[i] = (Val == MINR_VAL_1) ? '1' : (Val == MINR_VAL_0) ? '0' : 'x';
     }
     pTarget[nRegs] = '\0';
 
@@ -1106,11 +1109,11 @@ Vec_Int_t * Minr_GetRandomReachableState(Gia_Man_t * pGia, int nFramesToSim) {
     Gia_Obj_t * pObj;
     int iObj, k;
     
-    // Set initial ROs to 0/random
-    Gia_ManForEachRo(pGia, pObj, iObj) 
+    int nRegs = Gia_ManRegNum(pGia);
+    for (int i = 0; i < nRegs; i++)
     {
-        // Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pObj), MINR_VAL_0);
-        Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pObj), Minr_RandomBinary());
+        Gia_Obj_t * pRo = Gia_ManRo(pGia, i);
+        Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pRo), Minr_RandomBinary());
     }
 
     for (int t = 0; t < nFramesToSim; t++) {
@@ -1123,12 +1126,17 @@ Vec_Int_t * Minr_GetRandomReachableState(Gia_Man_t * pGia, int nFramesToSim) {
         
         // Update ROs from RIs
         Vec_IntClear(vState);
-        Gia_ManForEachRi(pGia, pObj, iObj)
-            Vec_IntPush(vState, Vec_IntEntry(vObjVals, Gia_ObjId(pGia, pObj)));
-            
-        k = 0;
-        Gia_ManForEachRo(pGia, pObj, iObj)
-            Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pObj), Vec_IntEntry(vState, k++));
+        for (int i = 0; i < nRegs; i++)
+        {
+            Gia_Obj_t * pRi = Gia_ManRi(pGia, i);
+            Vec_IntPush(vState, Vec_IntEntry(vObjVals, Gia_ObjId(pGia, pRi)));
+        }
+
+        for (int i = 0; i < nRegs; i++)
+        {
+            Gia_Obj_t * pRo = Gia_ManRo(pGia, i);
+            Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pRo), Vec_IntEntry(vState, i));
+        }
     }
     
     Vec_IntFree(vObjVals);
