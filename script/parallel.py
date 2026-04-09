@@ -39,55 +39,55 @@ _PY39 = sys.version_info >= (3, 9)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BENCHMARKS = [
-    # "itc99/b01.aig",
-    # "itc99/b02.aig",
-    # "itc99/b03.aig",
-    # "itc99/b04.aig",
-    # "itc99/b05.aig",
-    # "itc99/b06.aig",
-    # "itc99/b07.aig",
-    # "itc99/b08.aig",
-    # "itc99/b09.aig",
-    # "itc99/b10.aig",
-    # "itc99/b11.aig",
-    # "itc99/b12.aig",
-    # "itc99/b13.aig",
-    # "itc99/b14.aig",
-    # "iscas89/s1196.aig",
-    # "iscas89/s1238.aig",
-    # "iscas89/s13207.aig",
-    # "iscas89/s1423.aig",
-    # "iscas89/s1488.aig",
-    # "iscas89/s15850.aig",
-    # "iscas89/s27.aig",
-    # "iscas89/s298.aig",
-    # "iscas89/s344.aig",
-    # "iscas89/s349.aig",
-    # "iscas89/s35932.aig",
-    # "iscas89/s382.aig",
-    # "iscas89/s386.aig",
-    # "iscas89/s38417.aig",
-    # "iscas89/s400.aig",
-    # "iscas89/s420.aig",
-    # "iscas89/s444.aig",
-    # "iscas89/s510.aig",
-    # "iscas89/s526.aig",
-    # "iscas89/s5378.aig",
-    # "iscas89/s641.aig",
-    # "iscas89/s713.aig",
-    # "iscas89/s820.aig",
-    # "iscas89/s832.aig",
-    # "iscas89/s838.aig",
-    # "iscas89/s9234.aig",
-    # "iscas89/s953.aig",
+    "iscas89/s9234.aig",
+    "iscas89/s13207.aig",
+    "iscas89/s38417.aig",
+    "itc99/b12.aig",
+    "itc99/b20.aig",
+    "itc99/b21.aig",
+    "itc99/b01.aig",
+    "itc99/b02.aig",
+    "itc99/b03.aig",
+    "itc99/b04.aig",
+    "itc99/b05.aig",
+    "itc99/b06.aig",
+    "itc99/b07.aig",
+    "itc99/b08.aig",
+    "itc99/b09.aig",
+    "itc99/b10.aig",
+    "itc99/b11.aig",
+    "itc99/b13.aig",
+    "itc99/b14.aig",
+    "iscas89/s1196.aig",
+    "iscas89/s1238.aig",
+    "iscas89/s1423.aig",
+    "iscas89/s1488.aig",
+    "iscas89/s15850.aig",
+    "iscas89/s27.aig",
+    "iscas89/s298.aig",
+    "iscas89/s344.aig",
+    "iscas89/s349.aig",
+    "iscas89/s35932.aig",
+    "iscas89/s382.aig",
+    "iscas89/s386.aig",
+    "iscas89/s400.aig",
+    "iscas89/s420.aig",
+    "iscas89/s444.aig",
+    "iscas89/s510.aig",
+    "iscas89/s526.aig",
+    "iscas89/s5378.aig",
+    "iscas89/s641.aig",
+    "iscas89/s713.aig",
+    "iscas89/s820.aig",
+    "iscas89/s832.aig",
+    "iscas89/s838.aig",
+    "iscas89/s953.aig",
+    "itc99/b15.aig",
+    "itc99/b17.aig",
+    "itc99/b18.aig",
+    "itc99/b19.aig",
+    "itc99/b22.aig",
     # "iscas89/s38584.aig",
-    # "itc99/b15.aig",
-    # "itc99/b17.aig",
-    # "itc99/b18.aig",
-    # "itc99/b19.aig",
-    # "itc99/b20.aig",
-    # "itc99/b21.aig",
-    # "itc99/b22.aig",
 ]
 
 BENCHMARK_DIR = os.path.join(ROOT_DIR, "benchmarks")
@@ -96,11 +96,10 @@ LOG_DIR = os.path.join(SCRIPT_DIR, "log")
 EXP_DIR = os.path.join(SCRIPT_DIR, "exp")
 
 ABC_BINARY = os.path.join(ROOT_DIR, "abc")
-TIMEOUT_SEC = 400
+TIMEOUT_SEC = 1000
 
 K = 0
-# SEEDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-SEEDS = [0, 1, 2, 3, 49]
+SEEDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 RANDOM_SIM_CYCLE = 100
 REFINE_MODE = 1
 REFINE_BIND_DC = True
@@ -108,8 +107,8 @@ REFINE_CONF_LIMIT = 10000
 REFINE_CORE_ONLY = False
 OTHER_ARGS = ""
 OPTIMIZE_MODE = 1
-DC_RATIO = [0]
-TOTAL_TIMEOUT = 200
+DC_RATIO = [0, 25, 50, 75]
+TOTAL_TIMEOUT = 600
 
 # 預設 8；可用 MINR_EXP_WORKERS 或命令列第二參數覆寫
 def _default_max_workers() -> int:

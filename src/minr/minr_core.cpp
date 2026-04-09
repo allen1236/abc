@@ -380,13 +380,16 @@ void Minr_ExtractEqCut(Minr_Man_t * p) {
     Gia_ManStaticFanoutStart(pGia);
 
     Vec_Int_t * vQueue = Vec_IntAlloc(256);
-    int k = 0;
-    Gia_ManForEachRo(pGia, pObj, iObj) {
-        char c = p->pInitStr[k++];
-        if (c == '0' || c == '1') continue;
-        int roId = Gia_ObjId(pGia, pObj);
-        Vec_IntPush(vQueue, roId);
-        Vec_IntWriteEntry(vMarked, roId, 1);
+    {
+        int nRegs = Gia_ManRegNum(pGia);
+        for (int ri = 0; ri < nRegs; ri++) {
+            char c = p->pInitStr[ri];
+            if (c == '0' || c == '1') continue;
+            Gia_Obj_t * pRo = Gia_ManRo(pGia, ri);
+            int roId = Gia_ObjId(pGia, pRo);
+            Vec_IntPush(vQueue, roId);
+            Vec_IntWriteEntry(vMarked, roId, 1);
+        }
     }
 
     while (Vec_IntSize(vQueue) > 0) {
@@ -462,14 +465,17 @@ void Minr_PropagateAndCut(Minr_Man_t * p) {
     Gia_ManForEachPi(pGia, pObj, iObj)
         Vec_IntWriteEntry(p->vPropVals, Gia_ObjId(pGia, pObj), MINR_VAL_X);
 
-    // Set ROs from -I
-    int k = 0;
-    Gia_ManForEachRo(pGia, pObj, iObj) {
-        char c = p->pInitStr[k++];
-        int Val = MINR_VAL_X;
-        if (c == '0') Val = MINR_VAL_0;
-        else if (c == '1') Val = MINR_VAL_1;
-        Vec_IntWriteEntry(p->vPropVals, Gia_ObjId(pGia, pObj), Val);
+    // Set ROs from -I (latch-index order)
+    {
+        int nRegs = Gia_ManRegNum(pGia);
+        for (int ri = 0; ri < nRegs; ri++) {
+            Gia_Obj_t * pRo = Gia_ManRo(pGia, ri);
+            char c = p->pInitStr[ri];
+            int Val = MINR_VAL_X;
+            if (c == '0') Val = MINR_VAL_0;
+            else if (c == '1') Val = MINR_VAL_1;
+            Vec_IntWriteEntry(p->vPropVals, Gia_ObjId(pGia, pRo), Val);
+        }
     }
 
     // 3. Run Core Simulation
@@ -485,12 +491,13 @@ void Minr_PropagateAndCut(Minr_Man_t * p) {
         Vec_IntForEachEntry(p->vCutNodes, NodeId, ci)
             Vec_IntWriteEntry(vCutSet, NodeId, 1);
         int nSpec = 0, nSpecInCut = 0;
-        k = 0;
-        Gia_ManForEachRo(pGia, pObj, iObj) {
-            char c = p->pInitStr[k++];
+        int nRegs = Gia_ManRegNum(pGia);
+        for (int ri = 0; ri < nRegs; ri++) {
+            char c = p->pInitStr[ri];
             if (c == '0' || c == '1') {
                 nSpec++;
-                if (Vec_IntEntry(vCutSet, Gia_ObjId(pGia, pObj)))
+                Gia_Obj_t * pRo = Gia_ManRo(pGia, ri);
+                if (Vec_IntEntry(vCutSet, Gia_ObjId(pGia, pRo)))
                     nSpecInCut++;
             }
         }
@@ -823,13 +830,13 @@ static void Minr_DebugSolveCutBuckets( Minr_Man_t * p, Vec_Int_t * vSoftLits, do
             Vec_IntAppend(dst, vC);
         }
 
-        // Always constrain specified registers @ t=k (from pInitStr)
+        // Always constrain specified registers @ t=k (from pInitStr, latch-index order)
         {
-            int ri = 0;
-            Gia_Obj_t * pRo;
-            Gia_ManForEachRo(pGia, pRo, ri) {
+            int nRegs = Gia_ManRegNum(pGia);
+            for (int ri = 0; ri < nRegs; ri++) {
                 char c = p->pInitStr[ri];
                 if (c != '0' && c != '1') continue;
+                Gia_Obj_t * pRo = Gia_ManRo(pGia, ri);
                 AddFixed01(vHard, Gia_ObjId(pGia, pRo), kFrame, (c == '0') ? MINR_VAL_0 : MINR_VAL_1);
             }
         }
@@ -1026,9 +1033,12 @@ int Minr_VerifyResult(Minr_Man_t * p, Vec_Int_t * vModel) {
         }
 
         // Set ROs from vCurrentState
-        int k = 0;
-        Gia_ManForEachRo(pGia, pObj, iObj) {
-            Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pObj), Vec_IntEntry(vCurrentState, k++));
+        {
+            int nRegs = Gia_ManRegNum(pGia);
+            for (int ri = 0; ri < nRegs; ri++) {
+                Gia_Obj_t * pRo = Gia_ManRo(pGia, ri);
+                Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pRo), Vec_IntEntry(vCurrentState, ri));
+            }
         }
 
         // Run Simulation
@@ -1036,10 +1046,11 @@ int Minr_VerifyResult(Minr_Man_t * p, Vec_Int_t * vModel) {
 
         // If not last frame, capture RIs for next state
         if (t < p->nFrames) {
-            k = 0;
-            Gia_ManForEachRi(pGia, pObj, iObj) {
-                int Val = Vec_IntEntry(vObjVals, Gia_ObjId(pGia, pObj));
-                Vec_IntWriteEntry(vCurrentState, k++, Val);
+            int nRegs = Gia_ManRegNum(pGia);
+            for (int ri = 0; ri < nRegs; ri++) {
+                Gia_Obj_t * pRi = Gia_ManRi(pGia, ri);
+                int Val = Vec_IntEntry(vObjVals, Gia_ObjId(pGia, pRi));
+                Vec_IntWriteEntry(vCurrentState, ri, Val);
             }
         }
     }
