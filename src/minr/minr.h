@@ -29,6 +29,10 @@ typedef struct Minr_Man_t_ Minr_Man_t;
 #define MINR_EARLY_STOP_IMPROVEMENT_RATIO 0.001
 // In-process MaxSAT via IPAMIR (EvalMaxSAT2022); path relative to ABC cwd.
 #define MINR_IPAMIR_SO_DEFAULT "third_party/EvalMaxSAT2022/libipamirEvalMaxSAT2022.so"
+// -p (cut diagnosis): external EvalMaxSAT binary (WCNF → stdout file). Normal &minr uses IPAMIR only.
+// MINR_DEBUG_EVALMAXSAT_BIN — path to EvalMaxSAT_bin (default: third_party/EvalMaxSAT/build/EvalMaxSAT_bin).
+// MINR_DEBUG_EVALMAXSAT_TIMEOUT_MULT — wall-clock multiplier on -t for the external run (default 1).
+// MINR_DEBUG_EVALMAXSAT_NO_TIMEOUT=1 — do not wrap with timeout(1).
 
 struct Minr_Man_t_
 {
@@ -51,7 +55,7 @@ struct Minr_Man_t_
     int         nDontCarePercent; // -D <1..99>: % of target registers set to don't care
     int         nOptimizeDenseKMax; // -K N with -O 1: dense sweep inclusive end; -1 = geometric schedule
     int         nOptimizeDenseKMin; // with -K: dense sweep start from -k (CLI default 0 if -k omitted)
-    int         fDebugNoPropCut;   // -p: debug: cut diagnosis mode (see minr_core.cpp)
+    int         fDebugNoPropCut;   // -p: use external EvalMaxSAT binary instead of IPAMIR (.so)
 
     // Internal State
     Vec_Int_t * vVarMap;    // Mapping: (ObjId, Frame) -> SatVar (Base)

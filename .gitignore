@@ -66,3 +66,10 @@ abc.history
 
 .vscode/
 .clangd
+
+# Local experiment artifacts / third-party build trees (do not commit)
+/third_party/EvalMaxSAT/
+/tool/
+/benchmarks/example.blif
+/benchmarks/iscas89/*.ps
+/example.ps

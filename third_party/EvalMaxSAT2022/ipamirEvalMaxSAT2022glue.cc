@@ -97,8 +97,8 @@ public:
        connect_terminator_to(maxSATnoAssumed.get());
        bool ok_noassum = maxSATnoAssumed->solve();
        disconnect_terminator_from(maxSATnoAssumed.get());
-       if (!ok_noassum && was_terminated()) {
-           return 0; // terminated / time limit
+       if (!ok_noassum && (was_terminated() || maxSATnoAssumed->terminated())) {
+           return 0; // terminated / time limit (avoid misreporting UNSAT)
        }
 
        maxSATwithAssump = std::make_shared<EvalMaxSAT>(*maxSATnoAssumed);
@@ -123,6 +123,9 @@ public:
        maxSATnoAssumed->IN_ASSUM = false;
 
        if (was_terminated()) {
+           return 0;
+       }
+       if (!return_val && maxSATwithAssump->terminated()) {
            return 0;
        }
        if(return_val == 0){

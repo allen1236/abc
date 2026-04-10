@@ -11,6 +11,16 @@
 #include "minr.h"
 #include "minr_ipamir_dyn.h"
 #include <time.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/time.h>
 
 ABC_NAMESPACE_IMPL_START
 
@@ -613,9 +623,310 @@ void Minr_AddEquiv(Minr_Man_t * p, int iObjTo, int iObjFrom, int FrameTo, int Fr
 ///                    SOLVER IO & DECODING                          ///
 ////////////////////////////////////////////////////////////////////////
 
+static int Minr_DumpHardCnfDimacs( Minr_Man_t * p, Vec_Wec_t * vHardClauses, const char * pPath )
+{
+    if ( !pPath || !pPath[0] )
+        return 0;
+
+    FILE * f = fopen( pPath, "w" );
+    if ( !f )
+    {
+        printf("[Minr] ERROR: cannot open CNF dump path '%s'.\n", pPath);
+        return 0;
+    }
+
+    int nClauses = Vec_WecSize( vHardClauses );
+    fprintf( f, "p cnf %d %d\n", p->nSatVars, nClauses );
+
+    Vec_Int_t * vC; int k, Lit, i;
+    Vec_WecForEachLevel( vHardClauses, vC, k )
+    {
+        Vec_IntForEachEntry( vC, Lit, i )
+        {
+            int Var = Abc_Lit2Var( Lit );
+            int DimacsLit = Abc_LitIsCompl( Lit ) ? -Var : Var;
+            fprintf( f, "%d ", DimacsLit );
+        }
+        fprintf( f, "0\n" );
+    }
+    fclose( f );
+    return 1;
+}
+
+static int Minr_DumpWcnfDimacs( Minr_Man_t * p, Vec_Wec_t * vHardClauses, Vec_Int_t * vSoftLits, const char * pPath )
+{
+    if ( !pPath || !pPath[0] )
+        return 0;
+
+    FILE * f = fopen( pPath, "w" );
+    if ( !f )
+    {
+        printf("[Minr] ERROR: cannot open WCNF dump path '%s'.\n", pPath);
+        return 0;
+    }
+
+    int nHard = Vec_WecSize( vHardClauses );
+    int nSoft = vSoftLits ? Vec_IntSize( vSoftLits ) : 0;
+    int nClauses = nHard + nSoft;
+    unsigned long long top = (unsigned long long)nSoft + 1ull;
+    fprintf( f, "p wcnf %d %d %llu\n", p->nSatVars, nClauses, top );
+
+    Vec_Int_t * vC; int k, Lit, i;
+    Vec_WecForEachLevel( vHardClauses, vC, k )
+    {
+        fprintf( f, "%llu ", top );
+        Vec_IntForEachEntry( vC, Lit, i )
+        {
+            int Var = Abc_Lit2Var( Lit );
+            int DimacsLit = Abc_LitIsCompl( Lit ) ? -Var : Var;
+            fprintf( f, "%d ", DimacsLit );
+        }
+        fprintf( f, "0\n" );
+    }
+
+    if ( vSoftLits )
+    {
+        int Soft;
+        Vec_IntForEachEntry( vSoftLits, Soft, k )
+        {
+            int Var = Abc_Lit2Var( Soft );
+            int DimacsSoft = Abc_LitIsCompl( Soft ) ? -Var : Var;
+            fprintf( f, "1 %d 0\n", DimacsSoft );
+        }
+    }
+
+    fclose( f );
+    return 1;
+}
+
+static const char * Minr_DebugEvalMaxSatBinaryPath( void )
+{
+    const char * e = getenv( "MINR_DEBUG_EVALMAXSAT_BIN" );
+    if ( e && e[0] )
+        return e;
+    return "third_party/EvalMaxSAT/build/EvalMaxSAT_bin";
+}
+
+// -p: same WCNF as IPAMIR path; run EvalMaxSAT_bin (optional timeout(1)), parse captured stdout.
+// Filenames use pid + epoch µs + seq so concurrent runs cannot read stale .out files.
+static Vec_Int_t * Minr_ExternalEvalMaxSatSolve( Minr_Man_t * p, Vec_Wec_t * vHardClauses, Vec_Int_t * vSoftLits, double timeoutSec )
+{
+    static unsigned s_seq = 0;
+    unsigned seq = ++s_seq;
+
+    struct timeval tv;
+    gettimeofday( &tv, NULL );
+    long long epoch_us = (long long)tv.tv_sec * 1000000LL + (long long)tv.tv_usec;
+    int ppid = (int)getpid();
+    char wcnfPath[1088];
+    char outPath[1088];
+    snprintf( wcnfPath, sizeof wcnfPath, "/tmp/minr_ext_%d_%lld_%u.wcnf", ppid, epoch_us, seq );
+    snprintf( outPath, sizeof outPath, "/tmp/minr_ext_%d_%lld_%u.out", ppid, epoch_us, seq );
+
+    if ( !Minr_DumpWcnfDimacs( p, vHardClauses, vSoftLits, wcnfPath ) )
+    {
+        p->solverStatus = 3;
+        return NULL;
+    }
+
+    const char * pBin = Minr_DebugEvalMaxSatBinaryPath();
+
+    double wallMult = 1.0;
+    const char * pMult = getenv( "MINR_DEBUG_EVALMAXSAT_TIMEOUT_MULT" );
+    if ( pMult && pMult[0] )
+        wallMult = atof( pMult );
+    if ( wallMult <= 0 )
+        wallMult = 1.0;
+
+    const char * pNoTimeout = getenv( "MINR_DEBUG_EVALMAXSAT_NO_TIMEOUT" );
+    int useTimeout = ( timeoutSec > 0 && ( !pNoTimeout || pNoTimeout[0] != '1' || pNoTimeout[1] != 0 ) );
+    int wallSec = 0;
+    if ( useTimeout )
+    {
+        wallSec = (int)( timeoutSec * wallMult + 0.999 );
+        if ( wallSec < 1 )
+            wallSec = 1;
+    }
+
+    int childExit = 0;
+    int timedOut = 0;
+
+#ifndef _WIN32
+    {
+        pid_t ch = fork();
+        if ( ch < 0 )
+        {
+            printf( "[Minr] ERROR: -p EvalMaxSAT: fork failed (%s).\n", strerror( errno ) );
+            (void)remove( wcnfPath );
+            p->solverStatus = 3;
+            return NULL;
+        }
+        if ( ch == 0 )
+        {
+            int fd = open( outPath, O_WRONLY | O_CREAT | O_TRUNC, 0644 );
+            if ( fd < 0 )
+                _exit( 126 );
+            dup2( fd, STDOUT_FILENO );
+            dup2( fd, STDERR_FILENO );
+            close( fd );
+            if ( useTimeout )
+            {
+                char ts[32];
+                snprintf( ts, sizeof ts, "%d", wallSec );
+                execlp( "timeout", "timeout", "-k", "10", ts, pBin, wcnfPath, (char *)NULL );
+            }
+            else
+                execlp( pBin, pBin, wcnfPath, (char *)NULL );
+            _exit( 127 );
+        }
+        int st = 0;
+        if ( waitpid( ch, &st, 0 ) < 0 )
+        {
+            printf( "[Minr] ERROR: -p EvalMaxSAT: waitpid failed (%s).\n", strerror( errno ) );
+            (void)remove( wcnfPath );
+            (void)remove( outPath );
+            p->solverStatus = 3;
+            return NULL;
+        }
+        if ( WIFEXITED( st ) )
+        {
+            childExit = WEXITSTATUS( st );
+            if ( useTimeout && childExit == 124 )
+                timedOut = 1;
+        }
+        else if ( WIFSIGNALED( st ) )
+            childExit = 128 + WTERMSIG( st );
+    }
+#else
+    {
+        char cmd[12288];
+        if ( useTimeout )
+            snprintf( cmd, sizeof cmd, "timeout -k 10 %d \"%s\" \"%s\" > \"%s\" 2>&1", wallSec, pBin, wcnfPath, outPath );
+        else
+            snprintf( cmd, sizeof cmd, "\"%s\" \"%s\" > \"%s\" 2>&1", pBin, wcnfPath, outPath );
+        int sysSt = system( cmd );
+        if ( useTimeout && WIFEXITED( sysSt ) && WEXITSTATUS( sysSt ) == 124 )
+            timedOut = 1;
+        if ( WIFEXITED( sysSt ) )
+            childExit = WEXITSTATUS( sysSt );
+    }
+#endif
+
+    (void)remove( wcnfPath );
+
+    if ( p->vLevel >= 2 )
+        printf( "[Minr -p] EvalMaxSAT child exit=%d out=%s\n", childExit, outPath );
+
+    FILE * fo = fopen( outPath, "r" );
+    if ( !fo )
+    {
+        printf( "[Minr] ERROR: -p EvalMaxSAT: cannot read output '%s'.\n", outPath );
+        p->solverStatus = 3;
+        (void)remove( outPath );
+        return NULL;
+    }
+
+    char * lineBuf = NULL;
+    size_t lineCap = 0;
+    int sawOptimum = 0, sawUnsat = 0, sawUnknown = 0;
+    Vec_Int_t * vModel = NULL;
+
+    while ( 1 )
+    {
+        ssize_t nRead = getline( &lineBuf, &lineCap, fo );
+        if ( nRead <= 0 )
+            break;
+        if ( nRead > 0 && lineBuf[nRead - 1] == '\n' )
+            lineBuf[nRead - 1] = 0;
+
+        if ( !strncmp( lineBuf, "s ", 2 ) )
+        {
+            if ( strstr( lineBuf, "OPTIMUM" ) )
+                sawOptimum = 1;
+            if ( strstr( lineBuf, "UNSAT" ) )
+                sawUnsat = 1;
+            if ( strstr( lineBuf, "UNKNOWN" ) )
+                sawUnknown = 1;
+        }
+        if ( sawOptimum && !strncmp( lineBuf, "v ", 2 ) )
+        {
+            const char * s = lineBuf + 2;
+            while ( *s == ' ' || *s == '\t' )
+                s++;
+            int n = (int)strlen( s );
+            int all01 = 1;
+            for ( int i = 0; i < n; i++ )
+            {
+                if ( s[i] != '0' && s[i] != '1' )
+                {
+                    all01 = 0;
+                    break;
+                }
+            }
+            if ( all01 && n == p->nSatVars )
+            {
+                vModel = Vec_IntStart( p->nSatVars + 1 );
+                for ( int v = 1; v <= p->nSatVars; v++ )
+                    Vec_IntWriteEntry( vModel, v, ( s[v - 1] == '1' ) ? 1 : 0 );
+            }
+            else
+            {
+                vModel = Vec_IntStart( p->nSatVars + 1 );
+                char * savePtr = NULL;
+                char * tok = strtok_r( lineBuf + 2, " \t", &savePtr );
+                while ( tok )
+                {
+                    int lit = atoi( tok );
+                    if ( lit == 0 )
+                        break;
+                    int v = abs( lit );
+                    if ( v >= 1 && v <= p->nSatVars )
+                        Vec_IntWriteEntry( vModel, v, lit > 0 ? 1 : 0 );
+                    tok = strtok_r( NULL, " \t", &savePtr );
+                }
+            }
+        }
+    }
+    free( lineBuf );
+    fclose( fo );
+    (void)remove( outPath );
+
+    if ( timedOut || sawUnknown )
+    {
+        printf( "[Minr] -p EvalMaxSAT: %s.\n", timedOut ? "wall-clock timeout (timeout(1) exit 124)" : "reported UNKNOWN" );
+        p->solverStatus = 4;
+        if ( vModel )
+            Vec_IntFree( vModel );
+        return NULL;
+    }
+    if ( sawUnsat && !sawOptimum )
+    {
+        printf( "[Minr] -p EvalMaxSAT: UNSATISFIABLE.\n" );
+        p->solverStatus = 2;
+        if ( vModel )
+            Vec_IntFree( vModel );
+        return NULL;
+    }
+    if ( !sawOptimum || !vModel )
+    {
+        printf( "[Minr] ERROR: -p EvalMaxSAT: could not parse solution (missing s OPTIMUM FOUND or v line).\n" );
+        p->solverStatus = 3;
+        if ( vModel )
+            Vec_IntFree( vModel );
+        return NULL;
+    }
+
+    p->solverStatus = 1;
+    return vModel;
+}
+
 static Vec_Int_t * Minr_CallSolverIpamir( Minr_Man_t * p, Vec_Wec_t * vHardClauses, Vec_Int_t * vSoftLits, const char * pSoPath, double timeoutSec )
 {
     Minr_IpamirApi_t Api;
+    const char * pSoOverride = getenv("MINR_IPAMIR_SO");
+    if (pSoOverride && pSoOverride[0])
+        pSoPath = pSoOverride;
+
     if ( !Minr_IpamirApiLoad( &Api, pSoPath ) )
     {
         p->solverStatus = 3;
@@ -641,29 +952,47 @@ static Vec_Int_t * Minr_CallSolverIpamir( Minr_Man_t * p, Vec_Wec_t * vHardClaus
     };
     Minr_TermState_t TermState;
 
-    // Hard clauses (CNF store uses ABC literals; convert to DIMACS signed literals).
     Vec_Int_t * vC; int k, Lit, i;
     Vec_WecForEachLevel( vHardClauses, vC, k )
     {
         Vec_IntForEachEntry( vC, Lit, i )
         {
             int Var = Abc_Lit2Var( Lit );
+            if ( Var <= 0 || Var > p->nSatVars )
+            {
+                printf("[Minr] ERROR: invalid hard literal var=%d (nSatVars=%d) at clause=%d.\n",
+                       Var, p->nSatVars, k);
+                p->solverStatus = 3;
+                Api.ipamir_release( s );
+                Minr_IpamirApiUnload( &Api );
+                return NULL;
+            }
             int DimacsLit = Abc_LitIsCompl( Lit ) ? -Var : Var;
             Api.ipamir_add_hard( s, (int32_t)DimacsLit );
         }
         Api.ipamir_add_hard( s, 0 );
     }
 
-    // Soft literals: Minr objective uses soft unit clause (u) weight=1, which prefers u=1 (unknown).
-    // EvalMaxSAT2022's glue maps the sign to preferred assignment; passing (-Var) encourages Var=true there.
-    int Soft;
-    Vec_IntForEachEntry( vSoftLits, Soft, k )
+    if ( vSoftLits )
     {
-        int Var = Abc_Lit2Var( Soft );
-        Api.ipamir_add_soft_lit( s, (int32_t)(-Var), (uint64_t)1 );
+        int Soft;
+        Vec_IntForEachEntry( vSoftLits, Soft, k )
+        {
+            int Var = Abc_Lit2Var( Soft );
+            if ( Var <= 0 || Var > p->nSatVars )
+            {
+                printf("[Minr] ERROR: invalid soft literal var=%d (nSatVars=%d) at softIndex=%d.\n",
+                       Var, p->nSatVars, k);
+                p->solverStatus = 3;
+                Api.ipamir_release( s );
+                Minr_IpamirApiUnload( &Api );
+                return NULL;
+            }
+            int DimacsSoft = Abc_LitIsCompl( Soft ) ? -Var : Var;
+            Api.ipamir_add_soft_lit( s, (int32_t)DimacsSoft, (uint64_t)1 );
+        }
     }
 
-    // Attach time limit if requested (timeoutSec > 0).
     if ( Api.ipamir_set_terminate && timeoutSec > 0 ) {
         TermState.startCpu = Minr_CpuTicks();
         TermState.limitCpu = (abctime)(timeoutSec * (double)CLOCKS_PER_SEC);
@@ -715,244 +1044,19 @@ static Vec_Int_t * Minr_CallSolverIpamir( Minr_Man_t * p, Vec_Wec_t * vHardClaus
     return vModel;
 }
 
-// -p debug mode: solve multiple times with different cut buckets.
-// This is for diagnosis only; normal runs are unaffected.
-static void Minr_DebugSolveCutBuckets( Minr_Man_t * p, Vec_Int_t * vSoftLits, double timeoutSec )
+// -p: same CNF+soft as default; only the MaxSAT backend differs (external binary vs IPAMIR .so).
+static Vec_Int_t * Minr_SolveMaxSat( Minr_Man_t * p, Vec_Wec_t * vHard, Vec_Int_t * vSoft, double timeoutSec, int fExternal )
 {
-    Gia_Man_t * pGia = p->pGia;
-    int kFrame = p->nFrames;
-
-    Vec_Int_t * vCutPO  = Vec_IntAlloc(256);
-    Vec_Int_t * vCutRI  = Vec_IntAlloc(256);
-    Vec_Int_t * vCutAnd = Vec_IntAlloc(256);
-
-    // Bucket constant cut nodes by type (store NodeId; value read from vPropVals later)
+    if ( fExternal )
     {
-        int ci, NodeId;
-        Vec_IntForEachEntry(p->vCutNodes, NodeId, ci) {
-            int Val = Vec_IntEntry(p->vPropVals, NodeId);
-            if (Val == MINR_VAL_X) continue;
-            Gia_Obj_t * pObj = Gia_ManObj(pGia, NodeId);
-            if (Gia_ObjIsPo(pGia, pObj)) Vec_IntPush(vCutPO, NodeId);
-            else if (Gia_ObjIsRi(pGia, pObj)) Vec_IntPush(vCutRI, NodeId);
-            else Vec_IntPush(vCutAnd, NodeId);
-        }
+        abctime clk = Minr_CpuTicks();
+        Vec_Int_t * m = Minr_ExternalEvalMaxSatSolve( p, vHard, vSoft, timeoutSec );
+        p->timeSolver = Minr_CpuTicks() - clk;
+        if ( p->vLevel >= 1 )
+            printf( "[Minr -p] EvalMaxSAT binary: %s\n", Minr_DebugEvalMaxSatBinaryPath() );
+        return m;
     }
-
-    auto AddFixed01 = [&]( Vec_Wec_t * vH, int ObjId, int Frame, int Val ) {
-        int lit_T = Lit_T(p, ObjId, Frame);
-        int lit_F = Lit_F(p, ObjId, Frame);
-        if (Val == MINR_VAL_0) {
-            Vec_Int_t * c = Vec_WecPushLevel(vH); Vec_IntPush(c, Abc_LitNot(lit_T));
-            c = Vec_WecPushLevel(vH); Vec_IntPush(c, lit_F);
-        } else {
-            Vec_Int_t * c = Vec_WecPushLevel(vH); Vec_IntPush(c, lit_T);
-            c = Vec_WecPushLevel(vH); Vec_IntPush(c, Abc_LitNot(lit_F));
-        }
-    };
-
-    auto DebugSimValueAtTk = [&]( int ObjIdToProbe ) -> int {
-        // Simulate using decoded regs_only solution (p->vRoVals0, p->vPiVals).
-        // Returns MINR_VAL_0/1/X; prints a short line.
-        int nRegs = Gia_ManRegNum(pGia);
-        Vec_Int_t * vCurrentState = Vec_IntAlloc(nRegs);
-        Vec_Int_t * vObjVals = Vec_IntStart(Gia_ManObjNum(pGia));
-        Gia_Obj_t * pObj;
-        int iObj;
-
-        if (!p->vRoVals0) {
-            printf("[Debug -p] sim@tk: missing vRoVals0\n");
-            Vec_IntFree(vCurrentState);
-            Vec_IntFree(vObjVals);
-            return MINR_VAL_X;
-        }
-        // initial state from decoded t=0 RO values
-        Vec_IntAppend(vCurrentState, p->vRoVals0);
-
-        for (int t = 0; t <= kFrame; t++) {
-            // PIs
-            if (t < kFrame) {
-                if (p->vPiVals) {
-                    int iPi, nPi = Gia_ManPiNum(pGia);
-                    Gia_ManForEachPi(pGia, pObj, iPi) {
-                        int pid = Gia_ObjId(pGia, pObj);
-                        int Val = Vec_IntEntry(p->vPiVals, t * nPi + iPi) ? MINR_VAL_1 : MINR_VAL_0;
-                        Vec_IntWriteEntry(vObjVals, pid, Val);
-                    }
-                } else {
-                    // If PI sequence not decoded, fall back to X
-                    Gia_ManForEachPi(pGia, pObj, iObj)
-                        Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pObj), MINR_VAL_X);
-                }
-            } else {
-                // t == k: PIs treated as X in verify semantics
-                Gia_ManForEachPi(pGia, pObj, iObj)
-                    Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pObj), MINR_VAL_X);
-            }
-
-            // ROs from current state
-            int kk = 0;
-            Gia_ManForEachRo(pGia, pObj, iObj)
-                Vec_IntWriteEntry(vObjVals, Gia_ObjId(pGia, pObj), Vec_IntEntry(vCurrentState, kk++));
-
-            // simulate one timeframe
-            Minr_SimulateTimeframe(pGia, vObjVals);
-
-            if (t == kFrame)
-                break;
-
-            // next state from RIs
-            kk = 0;
-            Gia_ManForEachRi(pGia, pObj, iObj)
-                Vec_IntWriteEntry(vCurrentState, kk++, Vec_IntEntry(vObjVals, Gia_ObjId(pGia, pObj)));
-        }
-
-        int Val = Vec_IntEntry(vObjVals, ObjIdToProbe);
-        const char * pS = (Val == MINR_VAL_0) ? "0" : (Val == MINR_VAL_1) ? "1" : "X";
-        printf("[Debug -p] sim@t=%d: ObjId=%d Val=%s\n", kFrame, ObjIdToProbe, pS);
-        Vec_IntFree(vCurrentState);
-        Vec_IntFree(vObjVals);
-        return Val;
-    };
-
-    auto RunOne = [&]( const char * pTag, Vec_Int_t * vBucket ) -> int {
-        // Reset per-solve decoded fields
-        if (p->vPiVals)  { Vec_IntFree(p->vPiVals);  p->vPiVals  = NULL; }
-        if (p->vRoVals0) { Vec_IntFree(p->vRoVals0); p->vRoVals0 = NULL; }
-        p->solverStatus = 0;
-        p->timeSolver = 0;
-
-        // Copy base hard clauses
-        Vec_Wec_t * vHard = Vec_WecAlloc( Vec_WecSize(p->vClauses) + 1024 );
-        Vec_Int_t * vC; int lvl;
-        Vec_WecForEachLevel( p->vClauses, vC, lvl ) {
-            Vec_Int_t * dst = Vec_WecPushLevel(vHard);
-            Vec_IntAppend(dst, vC);
-        }
-
-        // Always constrain specified registers @ t=k (from pInitStr, latch-index order)
-        {
-            int nRegs = Gia_ManRegNum(pGia);
-            for (int ri = 0; ri < nRegs; ri++) {
-                char c = p->pInitStr[ri];
-                if (c != '0' && c != '1') continue;
-                Gia_Obj_t * pRo = Gia_ManRo(pGia, ri);
-                AddFixed01(vHard, Gia_ObjId(pGia, pRo), kFrame, (c == '0') ? MINR_VAL_0 : MINR_VAL_1);
-            }
-        }
-
-        // Add this bucket's cut constraints @ t=k
-        if (vBucket) {
-            int NodeId, i;
-            Vec_IntForEachEntry(vBucket, NodeId, i) {
-                int Val = Vec_IntEntry(p->vPropVals, NodeId);
-                if (Val == MINR_VAL_0 || Val == MINR_VAL_1)
-                    AddFixed01(vHard, NodeId, kFrame, Val);
-            }
-        }
-
-        Vec_Int_t * vModel = Minr_CallSolverIpamir( p, vHard, vSoftLits, MINR_IPAMIR_SO_DEFAULT, timeoutSec );
-        Vec_WecFree(vHard);
-
-        if (!vModel) {
-            const char * st = (p->solverStatus == 2) ? "UNSAT" : (p->solverStatus == 4) ? "TIMEOUT" : "ERROR";
-            printf("[Debug -p] %s: %s\n", pTag, st);
-            return p->solverStatus;
-        }
-
-        Minr_DecodeResult(p, vModel);
-        Vec_IntFree(vModel);
-
-        int nResets = 0, val0, idx;
-        if (p->vRoVals0) {
-            Vec_IntForEachEntry(p->vRoVals0, val0, idx)
-                if (val0 == MINR_VAL_0 || val0 == MINR_VAL_1) nResets++;
-        }
-        printf("[Debug -p] %s: SAT resets=%d, solver=%.2fs\n",
-               pTag, nResets, (double)p->timeSolver / CLOCKS_PER_SEC);
-
-        // Extra probe: for regs_only, simulate and report the problematic PO at t=k
-        if (!strcmp(pTag, "regs_only")) {
-            int probed = 1085; // b12: known UNSAT single PO constraint
-            int propVal = (p->vPropVals && probed < Vec_IntSize(p->vPropVals)) ? Vec_IntEntry(p->vPropVals, probed) : MINR_VAL_X;
-            const char * pProp = (propVal == MINR_VAL_0) ? "0" : (propVal == MINR_VAL_1) ? "1" : "X";
-            printf("[Debug -p] propagate (PI=X, RO=target): ObjId=%d Val=%s\n", probed, pProp);
-            DebugSimValueAtTk(probed);
-        }
-        return 1;
-    };
-
-    printf("[Debug -p] Cut diagnosis (batch hard clauses): timeout=%.1fs; all runs include specified regs@t=k.\n", timeoutSec);
-    int stRegs = RunOne("regs_only", NULL);
-    int stPO   = RunOne("regs + cut_PO", vCutPO);
-    int stRI   = RunOne("regs + cut_RI", vCutRI);
-    int stAnd  = RunOne("regs + cut_AND", vCutAnd);
-
-    // If PO bucket is UNSAT, shrink to a minimal UNSAT subset (binary split), then one-by-one.
-    if (stRegs == 1 && stPO == 2 && Vec_IntSize(vCutPO) > 0) {
-        printf("[Debug -p] Shrinking UNSAT cut_PO (n=%d)...\n", Vec_IntSize(vCutPO));
-        Vec_Int_t * vCur = Vec_IntDup(vCutPO);
-
-        // Binary split shrink: keep the UNSAT half until small.
-        while (Vec_IntSize(vCur) > 8) {
-            int n = Vec_IntSize(vCur);
-            int mid = n / 2;
-            Vec_Int_t * vA = Vec_IntAlloc(mid);
-            Vec_Int_t * vB = Vec_IntAlloc(n - mid);
-            for (int i = 0; i < mid; i++) Vec_IntPush(vA, Vec_IntEntry(vCur, i));
-            for (int i = mid; i < n; i++) Vec_IntPush(vB, Vec_IntEntry(vCur, i));
-
-            int stA = RunOne("shrink_PO_halfA", vA);
-            if (stA == 2) {
-                Vec_IntFree(vCur);
-                vCur = vA;
-                Vec_IntFree(vB);
-                continue;
-            }
-            int stB = RunOne("shrink_PO_halfB", vB);
-            if (stB == 2) {
-                Vec_IntFree(vCur);
-                vCur = vB;
-                Vec_IntFree(vA);
-                continue;
-            }
-
-            // Neither half alone UNSAT -> cannot shrink by simple bisection; stop.
-            Vec_IntFree(vA);
-            Vec_IntFree(vB);
-            break;
-        }
-
-        // One-by-one: find a single PO constraint that makes it UNSAT (if any).
-        int foundSingle = 0;
-        for (int i = 0; i < Vec_IntSize(vCur); i++) {
-            int NodeId = Vec_IntEntry(vCur, i);
-            Vec_Int_t * vOne = Vec_IntAlloc(1);
-            Vec_IntPush(vOne, NodeId);
-            int st1 = RunOne("single_PO", vOne);
-            Vec_IntFree(vOne);
-            if (st1 == 2) {
-                int Val = Vec_IntEntry(p->vPropVals, NodeId);
-                printf("[Debug -p] Found UNSAT single PO: ObjId=%d Val=%d\n", NodeId, Val);
-                foundSingle = 1;
-                break;
-            }
-        }
-        if (!foundSingle) {
-            printf("[Debug -p] No single PO alone caused UNSAT after shrinking; remaining n=%d\n", Vec_IntSize(vCur));
-            // Print the remaining small set for inspection.
-            for (int i = 0; i < Vec_IntSize(vCur); i++) {
-                int NodeId = Vec_IntEntry(vCur, i);
-                int Val = Vec_IntEntry(p->vPropVals, NodeId);
-                printf("[Debug -p]  PO[%d]: ObjId=%d Val=%d\n", i, NodeId, Val);
-            }
-        }
-        Vec_IntFree(vCur);
-    }
-
-    Vec_IntFree(vCutPO);
-    Vec_IntFree(vCutRI);
-    Vec_IntFree(vCutAnd);
+    return Minr_CallSolverIpamir( p, vHard, vSoft, MINR_IPAMIR_SO_DEFAULT, timeoutSec );
 }
 
 // Scenario 1: Verify the result by simulation
@@ -1118,7 +1222,7 @@ Vec_Int_t * Minr_GetRandomReachableState(Gia_Man_t * pGia, int nFramesToSim) {
     
     // Init state: All 0 (or random?) - let's use all 0 as cold start
     Gia_Obj_t * pObj;
-    int iObj, k;
+    int iObj;
     
     int nRegs = Gia_ManRegNum(pGia);
     for (int i = 0; i < nRegs; i++)
@@ -1719,10 +1823,8 @@ static int Minr_SolveSingleK(Minr_Man_t * p, double solverTimeout)
     Vec_IntFree(vTfiCut);
     Vec_IntFree(vTfiRi);
 
-    // 3. Cut constraints at t=k (hard clauses).
-    // In -p diagnosis mode, we DO NOT add cut constraints here — we pass them via
-    // assumptions in Minr_DebugSolveCutBuckets so we can test buckets separately.
-    if (!p->fDebugNoPropCut) {
+    // 3. Cut constraints at t=k (hard clauses). Same instance for IPAMIR and -p (external).
+    {
         int i, NodeId;
         Vec_IntForEachEntry(p->vCutNodes, NodeId, i) {
             int Val = Vec_IntEntry(p->vPropVals, NodeId);
@@ -1735,8 +1837,11 @@ static int Minr_SolveSingleK(Minr_Man_t * p, double solverTimeout)
     }
 
     // 4. Objective (Soft Clauses)
-    Vec_Int_t * vSoftLits = Vec_IntAlloc(Gia_ManRegNum(pGia));
+    Vec_Int_t * vSoftLits = NULL;
+    const char * pNoSoft = getenv("MINR_NO_SOFT");
+    if ( !pNoSoft || !pNoSoft[0] || (pNoSoft[0] == '0' && pNoSoft[1] == 0) )
     {
+        vSoftLits = Vec_IntAlloc(Gia_ManRegNum(pGia));
         int i;
         Gia_Obj_t * pObjRo;
         Gia_ManForEachRo(pGia, pObjRo, i) {
@@ -1751,19 +1856,35 @@ static int Minr_SolveSingleK(Minr_Man_t * p, double solverTimeout)
         }
     }
 
-    // 5. MaxSAT (IPAMIR in-process) & decode (PostRelax + Verify are done once in Minr_Solve)
-    if (p->fDebugNoPropCut) {
-        // -p: diagnosis mode with multiple solves. Use user-requested long timeout.
-        Minr_DebugSolveCutBuckets(p, vSoftLits, 1000.0);
-    } else {
-        Vec_Int_t * vModel = Minr_CallSolverIpamir( p, p->vClauses, vSoftLits, MINR_IPAMIR_SO_DEFAULT, solverTimeout );
-        if (vModel) {
-            Minr_DecodeResult(p, vModel);
-            Vec_IntFree(vModel);
+    // 5. MaxSAT: IPAMIR in-process, or -p external WCNF binary (same formula).
+    {
+        const char * pDumpCnf  = getenv("MINR_DUMP_CNF");
+        const char * pDumpWcnf = getenv("MINR_DUMP_WCNF");
+        int fDumped = 0;
+        if ( pDumpCnf && pDumpCnf[0] )
+            fDumped |= Minr_DumpHardCnfDimacs( p, p->vClauses, pDumpCnf );
+        if ( pDumpWcnf && pDumpWcnf[0] )
+            fDumped |= Minr_DumpWcnfDimacs( p, p->vClauses, vSoftLits, pDumpWcnf );
+        const char * pDumpOnly = getenv("MINR_DUMP_ONLY");
+        if ( fDumped && pDumpOnly && pDumpOnly[0] == '1' && pDumpOnly[1] == 0 )
+        {
+            printf("[Minr] MINR_DUMP_ONLY=1: dumped instance, skipping solve.\n");
+            p->solverStatus = 4;
+        }
+        else
+        {
+            double tlim = solverTimeout;
+            if ( p->fDebugNoPropCut && tlim <= 0 )
+                tlim = 1000.0; // external path: need a positive wall budget unless MINR_DEBUG_EVALMAXSAT_NO_TIMEOUT=1
+            Vec_Int_t * vModel = Minr_SolveMaxSat( p, p->vClauses, vSoftLits, tlim, p->fDebugNoPropCut );
+            if (vModel) {
+                Minr_DecodeResult(p, vModel);
+                Vec_IntFree(vModel);
+            }
         }
     }
 
-    Vec_IntFree(vSoftLits);
+    if (vSoftLits) Vec_IntFree(vSoftLits);
 
     // Count resets
     if (p->solverStatus == 1 && p->vRoVals0) {
@@ -2632,7 +2753,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     p->timeSolveEnd = 0;
 
     // 0. Pre-processing: Propagation & Cut (shared across all k values)
-    // -p diagnosis mode still needs propagation/cut to build buckets.
+    // -p uses the same propagation/cut CNF as the default path; only the MaxSAT backend differs.
     Minr_PropagateAndCut(p);
 
     // Solve phase
