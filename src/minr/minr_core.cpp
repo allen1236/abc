@@ -22,6 +22,9 @@
 #include <sys/wait.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 ABC_NAMESPACE_IMPL_START
 
@@ -795,6 +798,16 @@ static Vec_Int_t * Minr_ExternalEvalMaxSatSolve( Minr_Man_t * p, Vec_Wec_t * vHa
         }
         if ( ch == 0 )
         {
+#ifdef __linux__
+            // Make sure the external solver does not keep running if the parent process
+            // aborts early (e.g. Ctrl-C during waitpid -> parent returns to prompt).
+            // Also isolate it as a process group so the parent can reliably kill
+            // both "timeout" and the actual solver with killpg().
+            (void)setpgid( 0, 0 );
+            (void)prctl( PR_SET_PDEATHSIG, SIGKILL );
+            if ( getppid() == 1 )
+                _exit( 125 );
+#endif
             int fd = open( outPath, O_WRONLY | O_CREAT | O_TRUNC, 0644 );
             if ( fd < 0 )
                 _exit( 126 );
@@ -812,8 +825,17 @@ static Vec_Int_t * Minr_ExternalEvalMaxSatSolve( Minr_Man_t * p, Vec_Wec_t * vHa
             _exit( 127 );
         }
         int st = 0;
-        if ( waitpid( ch, &st, 0 ) < 0 )
+        while ( waitpid( ch, &st, 0 ) < 0 )
         {
+            if ( errno == EINTR )
+            {
+                // If interrupted (Ctrl-C), make sure we don't leave the solver running.
+#ifdef __linux__
+                (void)kill( -ch, SIGKILL ); // process group (timeout + solver)
+#endif
+                (void)kill( ch, SIGKILL );
+                continue;
+            }
             printf( "[Minr] ERROR: -p EvalMaxSAT: waitpid failed (%s).\n", strerror( errno ) );
             (void)remove( wcnfPath );
             (void)remove( outPath );
