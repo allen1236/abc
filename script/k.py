@@ -34,13 +34,13 @@ _PY39 = sys.version_info >= (3, 9)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BENCHMARKS = [
-    "iscas89/s35932.aig",
     "iscas89/s9234.aig",
-    "iscas89/s15850.aig",
-    "iscas89/s13207.aig",
-    "itc99/b12.aig",
-    "itc99/b14.aig",
-    "itc99/b20.aig",
+    # "iscas89/s35932.aig",
+    # "iscas89/s15850.aig",
+    # "iscas89/s13207.aig",
+    # "itc99/b12.aig",
+    # "itc99/b14.aig",
+    # "itc99/b20.aig",
 ]
 
 BENCHMARK_DIR = os.path.join(ROOT_DIR, "benchmarks")

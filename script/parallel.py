@@ -96,7 +96,7 @@ LOG_DIR = os.path.join(SCRIPT_DIR, "log")
 EXP_DIR = os.path.join(SCRIPT_DIR, "exp")
 
 ABC_BINARY = os.path.join(ROOT_DIR, "abc")
-TIMEOUT_SEC = 1000
+TIMEOUT_SEC = 1200
 
 K = 0
 SEEDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
@@ -115,7 +115,7 @@ def _default_max_workers() -> int:
     w = os.environ.get("MINR_EXP_WORKERS", "").strip()
     if w.isdigit():
         return max(1, int(w))
-    return 4
+    return 12
 
 
 MAX_WORKERS = _default_max_workers()

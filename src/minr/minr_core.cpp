@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 
 ABC_NAMESPACE_IMPL_START
 
@@ -707,6 +708,30 @@ static const char * Minr_DebugEvalMaxSatBinaryPath( void )
     return "third_party/EvalMaxSAT/build/EvalMaxSAT_bin";
 }
 
+static const char * Minr_DebugTmpDirPath( void )
+{
+    // Default to repo-local scratch to avoid /tmp collisions on shared systems.
+    // Assumes cwd is repo root (true for scripts/minr_regression and typical usage).
+    const char * e = getenv( "MINR_TMPDIR" );
+    if ( e && e[0] )
+        return e;
+    return "_/tmp";
+}
+
+static int Minr_EnsureDirExists( const char * pDir )
+{
+#ifndef _WIN32
+    if ( mkdir( pDir, 0775 ) == 0 )
+        return 1;
+    if ( errno == EEXIST )
+        return 1;
+    return 0;
+#else
+    (void)pDir;
+    return 1;
+#endif
+}
+
 // -p: same WCNF as IPAMIR path; run EvalMaxSAT_bin (optional timeout(1)), parse captured stdout.
 // Filenames use pid + epoch µs + seq so concurrent runs cannot read stale .out files.
 static Vec_Int_t * Minr_ExternalEvalMaxSatSolve( Minr_Man_t * p, Vec_Wec_t * vHardClauses, Vec_Int_t * vSoftLits, double timeoutSec )
@@ -720,8 +745,15 @@ static Vec_Int_t * Minr_ExternalEvalMaxSatSolve( Minr_Man_t * p, Vec_Wec_t * vHa
     int ppid = (int)getpid();
     char wcnfPath[1088];
     char outPath[1088];
-    snprintf( wcnfPath, sizeof wcnfPath, "/tmp/minr_ext_%d_%lld_%u.wcnf", ppid, epoch_us, seq );
-    snprintf( outPath, sizeof outPath, "/tmp/minr_ext_%d_%lld_%u.out", ppid, epoch_us, seq );
+    const char * pTmp = Minr_DebugTmpDirPath();
+    if ( !Minr_EnsureDirExists( pTmp ) )
+    {
+        printf( "[Minr] ERROR: cannot create temp dir '%s'.\n", pTmp );
+        p->solverStatus = 3;
+        return NULL;
+    }
+    snprintf( wcnfPath, sizeof wcnfPath, "%s/minr_ext_%d_%lld_%u.wcnf", pTmp, ppid, epoch_us, seq );
+    snprintf( outPath, sizeof outPath, "%s/minr_ext_%d_%lld_%u.out", pTmp, ppid, epoch_us, seq );
 
     if ( !Minr_DumpWcnfDimacs( p, vHardClauses, vSoftLits, wcnfPath ) )
     {
