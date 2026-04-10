@@ -26,6 +26,7 @@ import sys
 import subprocess
 import threading
 import time
+import signal
 from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
 from datetime import datetime
 
@@ -432,7 +433,7 @@ def main():
         for p in snap:
             try:
                 if p.poll() is None:
-                    p.terminate()
+                    os.killpg(p.pid, signal.SIGTERM)
             except Exception:
                 pass
         time.sleep(0.2)
@@ -441,7 +442,7 @@ def main():
         for p in snap:
             try:
                 if p.poll() is None:
-                    p.kill()
+                    os.killpg(p.pid, signal.SIGKILL)
             except Exception:
                 pass
 
@@ -491,7 +492,7 @@ def main():
                     proc.wait(timeout=TOTAL_TIMEOUT + PROC_WAIT_EXTRA_SEC)
                 except subprocess.TimeoutExpired:
                     try:
-                        proc.kill()
+                        os.killpg(proc.pid, signal.SIGKILL)
                     except Exception:
                         pass
                     try:

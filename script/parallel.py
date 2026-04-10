@@ -26,6 +26,7 @@ import sys
 import subprocess
 import threading
 import argparse
+import signal
 from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
 from datetime import datetime
 
@@ -357,7 +358,8 @@ def main():
         for p in snap:
             try:
                 if p.poll() is None:
-                    p.terminate()
+                    # shell=True + start_new_session=True: kill whole process group to avoid orphaned abc
+                    os.killpg(p.pid, signal.SIGTERM)
             except Exception:
                 pass
         # 給 SIGTERM 一點時間，再補 SIGKILL
@@ -372,7 +374,7 @@ def main():
         for p in snap:
             try:
                 if p.poll() is None:
-                    p.kill()
+                    os.killpg(p.pid, signal.SIGKILL)
             except Exception:
                 pass
 
@@ -428,7 +430,7 @@ def main():
                     proc.wait(timeout=TIMEOUT_SEC)
                 except subprocess.TimeoutExpired:
                     try:
-                        proc.kill()
+                        os.killpg(proc.pid, signal.SIGKILL)
                     except Exception:
                         pass
                     try:
