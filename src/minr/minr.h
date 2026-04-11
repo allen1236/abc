@@ -31,7 +31,7 @@ typedef struct Minr_Man_t_ Minr_Man_t;
 #define MINR_IPAMIR_SO_DEFAULT "third_party/EvalMaxSAT2022/libipamirEvalMaxSAT2022.so"
 // -p (cut diagnosis): external EvalMaxSAT binary (WCNF → stdout file). Normal &minr uses IPAMIR only.
 // MINR_DEBUG_EVALMAXSAT_BIN — path to EvalMaxSAT_bin (default: third_party/EvalMaxSAT/build/EvalMaxSAT_bin).
-// MINR_DEBUG_EVALMAXSAT_TIMEOUT_MULT — wall-clock multiplier on -t for the external run (default 1).
+// MINR_DEBUG_EVALMAXSAT_TIMEOUT_MULT — CPU-time multiplier on -t for external EvalMaxSAT (RLIMIT_CPU seconds; default 1).
 // MINR_DEBUG_EVALMAXSAT_NO_TIMEOUT=1 — do not wrap with timeout(1).
 
 struct Minr_Man_t_
@@ -90,7 +90,8 @@ struct Minr_Man_t_
     abctime     timeSolveStart; // timer start (after target state derived); thread CPU ticks
     abctime     timeSolveEnd;   // timer end (before verification); 0 = use current time; CPU ticks
     abctime     timeTickAfterOptimize; // after Minr_SolveOptimize (-O 1); 0 if N/A; for runtime_sec floor
-    abctime     timeSolver;     // MaxSAT solver CPU time (same clock as timeSolveStart)
+    abctime     timeSolver;     // MaxSAT: thread CPU around ipamir_solve, or parent overhead around external wait4
+    double      extSolverChildCpuSec; // cumulative EvalMaxSAT child user+sys CPU (wait4); external binary only; drives -t + report
 
     // -O 2 only: intermediate target state and concatenated output
     Vec_Int_t * vPiAtK;         // PI at t=k for current iteration (prev iter's t=0). NULL = first iter

@@ -22,6 +22,9 @@
 #include <sys/wait.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <sys/resource.h>
+#endif
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
@@ -42,6 +45,15 @@ ABC_NAMESPACE_IMPL_START
 
 // Thread CPU time: -t budgets, solver terminate callbacks, runtime_sec (fair when many abc processes run).
 static inline abctime Minr_CpuTicks() { return Abc_ThreadClock(); }
+
+// Elapsed seconds for global -t: thread CPU (IPAMIR, -p) or thread CPU + completed EvalMaxSAT child CPU (default external).
+static double Minr_ElapsedBudgetSec( Minr_Man_t * p )
+{
+    double thr = (double)( Minr_CpuTicks() - p->timeSolveStart ) / (double)CLOCKS_PER_SEC;
+    if ( p->fDebugNoPropCut )
+        return thr + p->extSolverChildCpuSec;
+    return thr;
+}
 
 // Helper macros for Dual-Rail
 static inline int Minr_GetVar(Minr_Man_t * p, int ObjId, int Frame) {
@@ -705,9 +717,6 @@ static int Minr_DumpWcnfDimacs( Minr_Man_t * p, Vec_Wec_t * vHardClauses, Vec_In
 
 static const char * Minr_DebugEvalMaxSatBinaryPath( void )
 {
-    const char * e = getenv( "MINR_DEBUG_EVALMAXSAT_BIN" );
-    if ( e && e[0] )
-        return e;
     return "third_party/EvalMaxSAT/build/EvalMaxSAT_bin";
 }
 
@@ -735,7 +744,14 @@ static int Minr_EnsureDirExists( const char * pDir )
 #endif
 }
 
-// -p: same WCNF as IPAMIR path; run EvalMaxSAT_bin (optional timeout(1)), parse captured stdout.
+#ifndef _WIN32
+static double Minr_RusageToSec( const struct timeval * tv )
+{
+    return (double)tv->tv_sec + (double)tv->tv_usec / 1000000.0;
+}
+#endif
+
+// External EvalMaxSAT: same WCNF as IPAMIR; direct exec + RLIMIT_CPU cap + wait4 child CPU (Unix).
 // Filenames use pid + epoch µs + seq so concurrent runs cannot read stale .out files.
 static Vec_Int_t * Minr_ExternalEvalMaxSatSolve( Minr_Man_t * p, Vec_Wec_t * vHardClauses, Vec_Int_t * vSoftLits, double timeoutSec )
 {
@@ -765,6 +781,15 @@ static Vec_Int_t * Minr_ExternalEvalMaxSatSolve( Minr_Man_t * p, Vec_Wec_t * vHa
     }
 
     const char * pBin = Minr_DebugEvalMaxSatBinaryPath();
+    if ( access( pBin, X_OK ) != 0 )
+    {
+        printf( "[Minr] ERROR: EvalMaxSAT binary not executable: '%s' (%s).\n",
+                pBin, strerror( errno ) );
+        printf( "[Minr] Hint: build it under third_party/EvalMaxSAT (expected %s).\n", pBin );
+        p->solverStatus = 3;
+        (void)remove( wcnfPath );
+        return NULL;
+    }
 
     double wallMult = 1.0;
     const char * pMult = getenv( "MINR_DEBUG_EVALMAXSAT_TIMEOUT_MULT" );
@@ -775,12 +800,16 @@ static Vec_Int_t * Minr_ExternalEvalMaxSatSolve( Minr_Man_t * p, Vec_Wec_t * vHa
 
     const char * pNoTimeout = getenv( "MINR_DEBUG_EVALMAXSAT_NO_TIMEOUT" );
     int useTimeout = ( timeoutSec > 0 && ( !pNoTimeout || pNoTimeout[0] != '1' || pNoTimeout[1] != 0 ) );
-    int wallSec = 0;
+    /* RLIMIT_CPU uses whole seconds (Unix); Windows still uses timeout(1) wall seconds. */
+    int capSec = 0;
     if ( useTimeout )
     {
-        wallSec = (int)( timeoutSec * wallMult + 0.999 );
-        if ( wallSec < 1 )
-            wallSec = 1;
+        double lim = timeoutSec * wallMult;
+        if ( lim < 1.0 )
+            lim = 1.0;
+        capSec = (int)( lim + 0.999 );
+        if ( capSec < 1 )
+            capSec = 1;
     }
 
     int childExit = 0;
@@ -791,7 +820,7 @@ static Vec_Int_t * Minr_ExternalEvalMaxSatSolve( Minr_Man_t * p, Vec_Wec_t * vHa
         pid_t ch = fork();
         if ( ch < 0 )
         {
-            printf( "[Minr] ERROR: -p EvalMaxSAT: fork failed (%s).\n", strerror( errno ) );
+            printf( "[Minr] ERROR: EvalMaxSAT: fork failed (%s).\n", strerror( errno ) );
             (void)remove( wcnfPath );
             p->solverStatus = 3;
             return NULL;
@@ -799,63 +828,63 @@ static Vec_Int_t * Minr_ExternalEvalMaxSatSolve( Minr_Man_t * p, Vec_Wec_t * vHa
         if ( ch == 0 )
         {
 #ifdef __linux__
-            // Make sure the external solver does not keep running if the parent process
-            // aborts early (e.g. Ctrl-C during waitpid -> parent returns to prompt).
-            // Also isolate it as a process group so the parent can reliably kill
-            // both "timeout" and the actual solver with killpg().
             (void)setpgid( 0, 0 );
             (void)prctl( PR_SET_PDEATHSIG, SIGKILL );
             if ( getppid() == 1 )
                 _exit( 125 );
 #endif
+            if ( useTimeout )
+            {
+                struct rlimit rl;
+                rl.rlim_cur = (rlim_t)capSec;
+                rl.rlim_max = (rlim_t)capSec;
+                if ( setrlimit( RLIMIT_CPU, &rl ) != 0 )
+                    _exit( 121 );
+            }
             int fd = open( outPath, O_WRONLY | O_CREAT | O_TRUNC, 0644 );
             if ( fd < 0 )
                 _exit( 126 );
             dup2( fd, STDOUT_FILENO );
             dup2( fd, STDERR_FILENO );
             close( fd );
-            if ( useTimeout )
-            {
-                char ts[32];
-                snprintf( ts, sizeof ts, "%d", wallSec );
-                execlp( "timeout", "timeout", "-k", "10", ts, pBin, wcnfPath, (char *)NULL );
-            }
-            else
-                execlp( pBin, pBin, wcnfPath, (char *)NULL );
+            execlp( pBin, pBin, wcnfPath, (char *)NULL );
             _exit( 127 );
         }
         int st = 0;
-        while ( waitpid( ch, &st, 0 ) < 0 )
+        struct rusage ru;
+        memset( &ru, 0, sizeof ru );
+        while ( wait4( ch, &st, 0, &ru ) < 0 )
         {
             if ( errno == EINTR )
             {
-                // If interrupted (Ctrl-C), make sure we don't leave the solver running.
 #ifdef __linux__
-                (void)kill( -ch, SIGKILL ); // process group (timeout + solver)
+                (void)kill( -ch, SIGKILL );
 #endif
                 (void)kill( ch, SIGKILL );
                 continue;
             }
-            printf( "[Minr] ERROR: -p EvalMaxSAT: waitpid failed (%s).\n", strerror( errno ) );
+            printf( "[Minr] ERROR: EvalMaxSAT: wait4 failed (%s).\n", strerror( errno ) );
             (void)remove( wcnfPath );
             (void)remove( outPath );
             p->solverStatus = 3;
             return NULL;
         }
+        p->extSolverChildCpuSec += Minr_RusageToSec( &ru.ru_utime ) + Minr_RusageToSec( &ru.ru_stime );
         if ( WIFEXITED( st ) )
-        {
             childExit = WEXITSTATUS( st );
-            if ( useTimeout && childExit == 124 )
+        else if ( WIFSIGNALED( st ) )
+        {
+            int sig = WTERMSIG( st );
+            childExit = 128 + sig;
+            if ( useTimeout && sig == SIGXCPU )
                 timedOut = 1;
         }
-        else if ( WIFSIGNALED( st ) )
-            childExit = 128 + WTERMSIG( st );
     }
 #else
     {
         char cmd[12288];
         if ( useTimeout )
-            snprintf( cmd, sizeof cmd, "timeout -k 10 %d \"%s\" \"%s\" > \"%s\" 2>&1", wallSec, pBin, wcnfPath, outPath );
+            snprintf( cmd, sizeof cmd, "timeout -k 10 %d \"%s\" \"%s\" > \"%s\" 2>&1", capSec, pBin, wcnfPath, outPath );
         else
             snprintf( cmd, sizeof cmd, "\"%s\" \"%s\" > \"%s\" 2>&1", pBin, wcnfPath, outPath );
         int sysSt = system( cmd );
@@ -869,12 +898,12 @@ static Vec_Int_t * Minr_ExternalEvalMaxSatSolve( Minr_Man_t * p, Vec_Wec_t * vHa
     (void)remove( wcnfPath );
 
     if ( p->vLevel >= 2 )
-        printf( "[Minr -p] EvalMaxSAT child exit=%d out=%s\n", childExit, outPath );
+        printf( "[Minr] EvalMaxSAT (external) child exit=%d out=%s\n", childExit, outPath );
 
     FILE * fo = fopen( outPath, "r" );
     if ( !fo )
     {
-        printf( "[Minr] ERROR: -p EvalMaxSAT: cannot read output '%s'.\n", outPath );
+        printf( "[Minr] ERROR: EvalMaxSAT (external): cannot read output '%s'.\n", outPath );
         p->solverStatus = 3;
         (void)remove( outPath );
         return NULL;
@@ -947,7 +976,7 @@ static Vec_Int_t * Minr_ExternalEvalMaxSatSolve( Minr_Man_t * p, Vec_Wec_t * vHa
 
     if ( timedOut || sawUnknown )
     {
-        printf( "[Minr] -p EvalMaxSAT: %s.\n", timedOut ? "wall-clock timeout (timeout(1) exit 124)" : "reported UNKNOWN" );
+        printf( "[Minr] EvalMaxSAT (external): %s.\n", timedOut ? "CPU time limit (RLIMIT_CPU, typically SIGXCPU)" : "reported UNKNOWN" );
         p->solverStatus = 4;
         if ( vModel )
             Vec_IntFree( vModel );
@@ -955,7 +984,7 @@ static Vec_Int_t * Minr_ExternalEvalMaxSatSolve( Minr_Man_t * p, Vec_Wec_t * vHa
     }
     if ( sawUnsat && !sawOptimum )
     {
-        printf( "[Minr] -p EvalMaxSAT: UNSATISFIABLE.\n" );
+        printf( "[Minr] EvalMaxSAT (external): UNSATISFIABLE.\n" );
         p->solverStatus = 2;
         if ( vModel )
             Vec_IntFree( vModel );
@@ -963,7 +992,7 @@ static Vec_Int_t * Minr_ExternalEvalMaxSatSolve( Minr_Man_t * p, Vec_Wec_t * vHa
     }
     if ( !sawOptimum || !vModel )
     {
-        printf( "[Minr] ERROR: -p EvalMaxSAT: could not parse solution (missing s OPTIMUM FOUND or v line).\n" );
+        printf( "[Minr] ERROR: EvalMaxSAT (external): could not parse solution (missing s OPTIMUM FOUND or v line).\n" );
         p->solverStatus = 3;
         if ( vModel )
             Vec_IntFree( vModel );
@@ -1103,11 +1132,11 @@ static Vec_Int_t * Minr_SolveMaxSat( Minr_Man_t * p, Vec_Wec_t * vHard, Vec_Int_
 {
     if ( fExternal )
     {
-        abctime clk = Minr_CpuTicks();
+        abctime clkCpu = Minr_CpuTicks();
         Vec_Int_t * m = Minr_ExternalEvalMaxSatSolve( p, vHard, vSoft, timeoutSec );
-        p->timeSolver = Minr_CpuTicks() - clk;
+        p->timeSolver = Minr_CpuTicks() - clkCpu;
         if ( p->vLevel >= 1 )
-            printf( "[Minr -p] EvalMaxSAT binary: %s\n", Minr_DebugEvalMaxSatBinaryPath() );
+            printf( "[Minr] EvalMaxSAT (external): %s\n", Minr_DebugEvalMaxSatBinaryPath() );
         return m;
     }
     return Minr_CallSolverIpamir( p, vHard, vSoft, MINR_IPAMIR_SO_DEFAULT, timeoutSec );
@@ -1436,9 +1465,9 @@ static void Minr_DumpReport(Minr_Man_t * p)
     // Runtime (exclude verification if timeSolveEnd set). All ticks: thread CPU (Minr_CpuTicks).
     abctime clkEnd = p->timeSolveEnd ? p->timeSolveEnd : Minr_CpuTicks();
     double totalSec = (double)(clkEnd - p->timeSolveStart) / CLOCKS_PER_SEC;
-    /* -O 1 + timeout_with_best: IPAMIR may stop slightly before the nominal -t CPU budget elapses;
+    /* -O 1 + timeout_with_best: IPAMIR (-p) may stop slightly before the nominal -t CPU budget elapses;
        floor the optimize-phase portion so runtime_sec ≈ -t + refine (+ tiny overhead). */
-    if ( p->nOptimizeMode == 1 && p->optStatus == 1 && p->optLastFailSolverStatus == 4 && p->totalTimeout > 0
+    if ( !p->fDebugNoPropCut && p->nOptimizeMode == 1 && p->optStatus == 1 && p->optLastFailSolverStatus == 4 && p->totalTimeout > 0
          && p->timeTickAfterOptimize > p->timeSolveStart )
     {
         abctime optSpan = p->timeTickAfterOptimize - p->timeSolveStart;
@@ -1446,7 +1475,10 @@ static void Minr_DumpReport(Minr_Man_t * p)
         if ( optSpan < minPhase )
             totalSec = (double)( minPhase + (clkEnd - p->timeTickAfterOptimize) ) / CLOCKS_PER_SEC;
     }
-    double solverSec = (double)p->timeSolver / CLOCKS_PER_SEC;
+    /* Default external EvalMaxSAT: add child process CPU (not charged to parent thread). */
+    if ( p->fDebugNoPropCut )
+        totalSec += p->extSolverChildCpuSec;
+    double solverSec = p->fDebugNoPropCut ? p->extSolverChildCpuSec : ( (double)p->timeSolver / CLOCKS_PER_SEC );
     double refineSec = (double)p->timeRefine / CLOCKS_PER_SEC;
 
     // Result counts (only meaningful when a solution exists)
@@ -2263,8 +2295,10 @@ void Minr_SolveOptimize(Minr_Man_t * p)
     int prevResetCount = nRegs;  // for early stop comparison
     int fDenseSweep = (p->nOptimizeDenseKMax >= 0); /* -K: run all k=0..N (or until global timeout) for per-k stats */
 
-    printf("\n[Optimize] Starting k-sweep with %s thread-CPU time budget.\n",
-           p->totalTimeout > 0 ? "limited" : "unlimited");
+    printf("\n[Optimize] Starting k-sweep with %s time budget.\n",
+           p->totalTimeout > 0
+               ? ( p->fDebugNoPropCut ? "limited CPU (abc thread + EvalMaxSAT children)" : "limited thread-CPU (IPAMIR)" )
+               : "unlimited" );
     if (fDenseSweep)
         printf("[Optimize] Dense sweep (-k .. -K): k=%d..%d; no early exit on 0 resets, UNSAT, or small improvement; stop at last k or time budget.\n",
                p->nOptimizeDenseKMin, p->nOptimizeDenseKMax);
@@ -2272,13 +2306,14 @@ void Minr_SolveOptimize(Minr_Man_t * p)
     for (int si = 0; si < nSchedule; si++) {
         int curK = kSchedule[si];
 
-        // Check time budget
-        double elapsed = (double)(Minr_CpuTicks() - p->timeSolveStart) / CLOCKS_PER_SEC;
+        // Check time budget (wall for external binary; thread CPU for IPAMIR -p)
+        double elapsed = Minr_ElapsedBudgetSec( p );
         double tRemain = 0;
         if (p->totalTimeout > 0) {
             tRemain = p->totalTimeout - elapsed;
             if (tRemain <= 1.0) {
-                printf("[Optimize] Thread-CPU time budget exhausted (%.1fs elapsed). Stopping.\n", elapsed);
+                printf( "[Optimize] %s time budget exhausted (%.1fs elapsed). Stopping.\n",
+                        p->fDebugNoPropCut ? "CPU" : "Thread-CPU (IPAMIR)", elapsed );
                 break;
             }
         }
@@ -2296,11 +2331,15 @@ void Minr_SolveOptimize(Minr_Man_t * p)
         double solverTimeout = (p->totalTimeout > 0) ? tRemain : 0;
 
         abctime clkIter = Minr_CpuTicks();
+        double extCpuIter0 = p->extSolverChildCpuSec;
         // Batch MaxSAT (TFI-pruned CNF, cut/PI@k as hard clauses). The incremental
         // path (ipamir_assume for cut / PI-X) matches logically but EvalMaxSAT2022's
         // IPAMIR glue can report spurious UNSAT on large instances (two-phase solve).
         int nResets = Minr_SolveSingleK(p, solverTimeout);
-        int iterMs = (int)((double)(Minr_CpuTicks() - clkIter) * 1000.0 / CLOCKS_PER_SEC);
+        double iterSec = (double)( Minr_CpuTicks() - clkIter ) / (double)CLOCKS_PER_SEC;
+        if ( p->fDebugNoPropCut )
+            iterSec += p->extSolverChildCpuSec - extCpuIter0;
+        int iterMs = (int)( iterSec * 1000.0 );
 
         Vec_IntPush(p->vOptIterK, curK);
         Vec_IntPush(p->vOptIterResets, nResets);
@@ -2369,7 +2408,7 @@ void Minr_SolveOptimize(Minr_Man_t * p)
         p->vPiVals = p->vBestPiVals;   p->vBestPiVals = NULL;
         p->vRoVals0 = p->vBestRoVals0; p->vBestRoVals0 = NULL;
 
-        double totalSec = (double)(Minr_CpuTicks() - p->timeSolveStart) / CLOCKS_PER_SEC;
+        double totalSec = Minr_ElapsedBudgetSec( p );
         printf("\n[Optimize] Final best: k=%d, resets=%d/%d FF (R/F=%.2f%%), total=%.3fs\n",
                p->bestK, p->bestResetCount, nRegs,
                100.0 * p->bestResetCount / nRegs, totalSec);
@@ -2424,12 +2463,13 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
     /* Save original pInitStr for final CEC (will be mutated during outer loop) */
     char * pOrigInitStr = p->pInitStr;
 
-    printf("\n[Optimize2] Outer-loop heuristic, segment limit=%.2fs (1/%d of budget).\n",
-           segLimit, MINR_OPT_BUDGET_PARTS);
+    printf("\n[Optimize2] Outer-loop heuristic, segment limit=%.2fs (1/%d of %s budget).\n",
+           segLimit, MINR_OPT_BUDGET_PARTS,
+           p->fDebugNoPropCut ? "CPU" : "thread-CPU" );
 
     for (;; nOuter++) {
         if (p->vLevel >= 3) printf("[Optimize2] >>> outer loop iteration nOuter=%d\n", nOuter);
-        double tOuterStart = (double)(Minr_CpuTicks() - p->timeSolveStart) / CLOCKS_PER_SEC;
+        double tOuterStart = Minr_ElapsedBudgetSec( p );
         if (p->totalTimeout > 0 && tOuterStart >= p->totalTimeout - 0.5) {
             printf("[Optimize2] Total time budget exhausted. Stopping.\n");
             break;
@@ -2462,7 +2502,8 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
         Minr_PropagateAndCut(p);
         if (p->vLevel >= 3) printf("[Optimize2] Minr_PropagateAndCut done, cut size=%d\n", p->vCutNodes ? Vec_IntSize(p->vCutNodes) : -1);
 
-        double segStart = Minr_CpuTicks();
+        abctime segStartCpu = Minr_CpuTicks();
+        double segExtCpu0 = p->extSolverChildCpuSec;
         int segBestResets = nRegs + 1;
         Vec_Int_t * vInnerK = Vec_IntAlloc(16);
         Vec_Int_t * vInnerResets = Vec_IntAlloc(16);
@@ -2491,14 +2532,16 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
 
         for (int si = startSi; si < nSchedule; si++) {
             int curK = kSchedule[si];
-            double elapsed = (double)(Minr_CpuTicks() - p->timeSolveStart) / CLOCKS_PER_SEC;
+            double elapsed = Minr_ElapsedBudgetSec( p );
             if (p->totalTimeout > 0 && elapsed >= p->totalTimeout - 1.0) break;
 
-            double segElapsed = (double)(Minr_CpuTicks() - segStart) / CLOCKS_PER_SEC;
+            double segElapsed = (double)( Minr_CpuTicks() - segStartCpu ) / (double)CLOCKS_PER_SEC;
+            if ( p->fDebugNoPropCut )
+                segElapsed += p->extSolverChildCpuSec - segExtCpu0;
             if (segElapsed >= segLimit) {
                 if (p->vLevel > 0)
                     printf("[Optimize2] Segment time (%.2fs) reached. Running refine, then new target.\n", segElapsed);
-                int segMs = (int)((double)(Minr_CpuTicks() - segStart) * 1000.0 / CLOCKS_PER_SEC);
+                int segMs = (int)( segElapsed * 1000.0 );
                 int segBestR = (segBestResets <= nRegs) ? segBestResets : -1;
                 Vec_IntPush(p->vOpt2OuterSegmentTimeMs, segMs);
                 Vec_IntPush(p->vOpt2OuterBestResets, segBestR);
@@ -2563,8 +2606,12 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
             if (solverTimeout > 0 && solverTimeout < 1.0) break;
 
             abctime clkIter = Minr_CpuTicks();
+            double ext0 = p->extSolverChildCpuSec;
             int nResets = Minr_SolveSingleK(p, solverTimeout);
-            int iterMs = (int)((double)(Minr_CpuTicks() - clkIter) * 1000.0 / CLOCKS_PER_SEC);
+            double innerIterSec = (double)( Minr_CpuTicks() - clkIter ) / (double)CLOCKS_PER_SEC;
+            if ( p->fDebugNoPropCut )
+                innerIterSec += p->extSolverChildCpuSec - ext0;
+            int iterMs = (int)( innerIterSec * 1000.0 );
 
             Vec_IntPush(vInnerK, curK);
             Vec_IntPush(vInnerResets, nResets);
@@ -2600,7 +2647,10 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
 
         /* Push segment stats and inner iteration data only when we did not break due to segment limit (that path already pushed and freed vInner*) */
         if (!fBrokeSegmentLimit) {
-            int segMs = (int)((double)(Minr_CpuTicks() - segStart) * 1000.0 / CLOCKS_PER_SEC);
+            double segSec = (double)( Minr_CpuTicks() - segStartCpu ) / (double)CLOCKS_PER_SEC;
+            if ( p->fDebugNoPropCut )
+                segSec += p->extSolverChildCpuSec - segExtCpu0;
+            int segMs = (int)( segSec * 1000.0 );
             Vec_IntPush(p->vOpt2OuterSegmentTimeMs, segMs);
             Vec_IntPush(p->vOpt2OuterBestResets, segBestResets <= nRegs ? segBestResets : -1);
             {
@@ -2670,7 +2720,7 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
             if (p->vLevel > 0) printf("[Optimize2] First segment best_k=0; treating as global optimum. Stopping.\n");
             break;
         }
-        double tTotal = (double)(Minr_CpuTicks() - p->timeSolveStart) / CLOCKS_PER_SEC;
+        double tTotal = Minr_ElapsedBudgetSec( p );
         if (p->totalTimeout > 0 && tTotal >= p->totalTimeout - 0.5) break;
         if (segBestResets == 0) break;
         if (Vec_IntSize(vOuterK) == 0) break;  /* no solution at all so far → terminate */
