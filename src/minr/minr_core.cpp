@@ -1266,21 +1266,35 @@ int Minr_VerifyResult(Minr_Man_t * p, Vec_Int_t * vModel) {
                    nWeak, nStrong, nSpec);
     }
 
-    // 3. Verify Cut Constraints at t=k
+    // 3. Verify last-tf constraints at t=k (cut or specified ROs)
     int nFailures = 0;
-    int i, NodeId;
-    Vec_IntForEachEntry(p->vCutNodes, NodeId, i) {
-        int ValTarget = Vec_IntEntry(p->vPropVals, NodeId);
-        int ValSim    = Vec_IntEntry(vObjVals, NodeId);
-
-        // If Target is Known (0/1), Sim must match.
-        // Note: ValSim could be X if solver failed logic, or solver used X for irrelevant inputs.
-        // But since we enforced equality on the cut, Sim SHOULD be 0/1 matching Target.
-        if (ValTarget != MINR_VAL_X) {
-            if (ValSim != ValTarget) {
+    if (Minr_ManUsesSpecRegAtLastTf(p)) {
+        int ri;
+        Gia_Obj_t * pRo;
+        Gia_ManForEachRo(pGia, pRo, ri) {
+            char tc = p->pInitStr[ri];
+            if (tc != '0' && tc != '1') continue;
+            int iRo = Gia_ObjId(pGia, pRo);
+            int tgtVal = (tc == '0') ? MINR_VAL_0 : MINR_VAL_1;
+            int ValSim = Vec_IntEntry(vObjVals, iRo);
+            if (ValSim != tgtVal) {
                 nFailures++;
                 if (p->vLevel > 0)
-                    printf("[Verify] Fail at Obj %d: Target=%d, Sim=%d\n", NodeId, ValTarget, ValSim);
+                    printf("[Verify] Fail at RO Obj %d: Target=%d, Sim=%d\n", iRo, tgtVal, ValSim);
+            }
+        }
+    } else {
+        int i, NodeId;
+        Vec_IntForEachEntry(p->vCutNodes, NodeId, i) {
+            int ValTarget = Vec_IntEntry(p->vPropVals, NodeId);
+            int ValSim    = Vec_IntEntry(vObjVals, NodeId);
+
+            if (ValTarget != MINR_VAL_X) {
+                if (ValSim != ValTarget) {
+                    nFailures++;
+                    if (p->vLevel > 0)
+                        printf("[Verify] Fail at Obj %d: Target=%d, Sim=%d\n", NodeId, ValTarget, ValSim);
+                }
             }
         }
     }
@@ -1289,7 +1303,12 @@ int Minr_VerifyResult(Minr_Man_t * p, Vec_Int_t * vModel) {
     Vec_IntFree(vObjVals);
 
     if (nFailures == 0) {
-        if (p->vLevel > 0) printf("[Verify] SUCCESS. Simulation matches cut constraints.\n");
+        if (p->vLevel > 0) {
+            if (Minr_ManUsesSpecRegAtLastTf(p))
+                printf("[Verify] SUCCESS. Simulation matches specified RO constraints at t=k.\n");
+            else
+                printf("[Verify] SUCCESS. Simulation matches cut constraints.\n");
+        }
         return 1;
     } else {
         printf("[Verify] FAILED. %d mismatches found.\n", nFailures);
@@ -1543,6 +1562,7 @@ static void Minr_DumpReport(Minr_Man_t * p)
     if (p->nDontCarePercent > 0)
         fprintf(pFile, "dontcare_pct   = %d\n",  p->nDontCarePercent);
     fprintf(pFile, "refine_mode    = %d\n",  p->nRefineMode);
+    fprintf(pFile, "last_tf_constr = %s\n",  Minr_ManUsesSpecRegAtLastTf(p) ? "specified_ro" : "cut");
     fprintf(pFile, "\n");
 
     // --- [refine] --- (before result)
@@ -1798,10 +1818,20 @@ static int Minr_SolveSingleK(Minr_Man_t * p, double solverTimeout)
     //    vTfiRi:  TFI of all RIs           — used at t<k
     Vec_Int_t * vCutRoots = Vec_IntAlloc(64);
     {
-        int i, NodeId;
-        Vec_IntForEachEntry(p->vCutNodes, NodeId, i) {
-            if (Vec_IntEntry(p->vPropVals, NodeId) != MINR_VAL_X)
-                Vec_IntPush(vCutRoots, NodeId);
+        int fSpecK = Minr_ManUsesSpecRegAtLastTf(p);
+        if (fSpecK) {
+            int ri;
+            Gia_Obj_t * pRo;
+            Gia_ManForEachRo(pGia, pRo, ri)
+                if (p->pInitStr[ri] == '0' || p->pInitStr[ri] == '1')
+                    Vec_IntPush(vCutRoots, Gia_ObjId(pGia, pRo));
+        }
+        if (Vec_IntSize(vCutRoots) == 0) {
+            int i, NodeId;
+            Vec_IntForEachEntry(p->vCutNodes, NodeId, i) {
+                if (Vec_IntEntry(p->vPropVals, NodeId) != MINR_VAL_X)
+                    Vec_IntPush(vCutRoots, NodeId);
+            }
         }
     }
     Vec_Int_t * vTfiCut = Minr_ComputeTfi(pGia, vCutRoots);
@@ -1819,7 +1849,8 @@ static int Minr_SolveSingleK(Minr_Man_t * p, double solverTimeout)
     if (p->vLevel >= 2) {
         int nC = 0, nR = 0, nO = Gia_ManObjNum(pGia);
         for (int j = 0; j < nO; j++) { nC += Vec_IntEntry(vTfiCut, j); nR += Vec_IntEntry(vTfiRi, j); }
-        printf("[TFI] cut cone: %d/%d nodes, RI cone: %d/%d nodes\n", nC, nO, nR, nO);
+        printf("[TFI] %s cone: %d/%d nodes, RI cone: %d/%d nodes\n",
+               Minr_ManUsesSpecRegAtLastTf(p) ? "specified-RO" : "cut", nC, nO, nR, nO);
     }
 
     // 1. Allocate Vars (only for nodes in the relevant TFI cone)
@@ -1923,16 +1954,31 @@ static int Minr_SolveSingleK(Minr_Man_t * p, double solverTimeout)
     Vec_IntFree(vTfiCut);
     Vec_IntFree(vTfiRi);
 
-    // 3. Cut constraints at t=k (hard clauses). Same instance for IPAMIR and -p (external).
+    // 3. Last-timeframe hard constraints: constant cut (default) or specified ROs (-S).
     {
-        int i, NodeId;
-        Vec_IntForEachEntry(p->vCutNodes, NodeId, i) {
-            int Val = Vec_IntEntry(p->vPropVals, NodeId);
-            if (Val == MINR_VAL_X) continue;
-            int lit_T = Lit_T(p, NodeId, nFrames);
-            int lit_F = Lit_F(p, NodeId, nFrames);
-            if (Val == MINR_VAL_0) { Minr_AddClause1(p, Abc_LitNot(lit_T)); Minr_AddClause1(p, lit_F); }
-            else if (Val == MINR_VAL_1) { Minr_AddClause1(p, lit_T); Minr_AddClause1(p, Abc_LitNot(lit_F)); }
+        int fSpecK = Minr_ManUsesSpecRegAtLastTf(p);
+        if (fSpecK) {
+            int ri;
+            Gia_Obj_t * pRo;
+            Gia_ManForEachRo(pGia, pRo, ri) {
+                char c = p->pInitStr[ri];
+                if (c != '0' && c != '1') continue;
+                int iRo = Gia_ObjId(pGia, pRo);
+                int lit_T = Lit_T(p, iRo, nFrames);
+                int lit_F = Lit_F(p, iRo, nFrames);
+                if (c == '0') { Minr_AddClause1(p, Abc_LitNot(lit_T)); Minr_AddClause1(p, lit_F); }
+                else { Minr_AddClause1(p, lit_T); Minr_AddClause1(p, Abc_LitNot(lit_F)); }
+            }
+        } else {
+            int i, NodeId;
+            Vec_IntForEachEntry(p->vCutNodes, NodeId, i) {
+                int Val = Vec_IntEntry(p->vPropVals, NodeId);
+                if (Val == MINR_VAL_X) continue;
+                int lit_T = Lit_T(p, NodeId, nFrames);
+                int lit_F = Lit_F(p, NodeId, nFrames);
+                if (Val == MINR_VAL_0) { Minr_AddClause1(p, Abc_LitNot(lit_T)); Minr_AddClause1(p, lit_F); }
+                else if (Val == MINR_VAL_1) { Minr_AddClause1(p, lit_T); Minr_AddClause1(p, Abc_LitNot(lit_F)); }
+            }
         }
     }
 
@@ -2176,17 +2222,36 @@ static int Minr_SolveSingleKIncr(Minr_Man_t * p, double solverTimeout)
         }
 
         int ci, NodeId;
-        Vec_IntForEachEntry(p->vCutNodes, NodeId, ci) {
-            int Val = Vec_IntEntry(p->vPropVals, NodeId);
-            if (Val == MINR_VAL_X) continue;
-            int Var_T = Abc_Lit2Var(Lit_T(p, NodeId, k));
-            int Var_F = Abc_Lit2Var(Lit_F(p, NodeId, k));
-            if (Val == MINR_VAL_0) {
-                p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)(-Var_T));
-                p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)( Var_F));
-            } else {
-                p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)( Var_T));
-                p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)(-Var_F));
+        if (Minr_ManUsesSpecRegAtLastTf(p)) {
+            int ri;
+            Gia_Obj_t * pRo;
+            Gia_ManForEachRo(pGia, pRo, ri) {
+                char c = p->pInitStr[ri];
+                if (c != '0' && c != '1') continue;
+                int iRo = Gia_ObjId(pGia, pRo);
+                int Var_T = Abc_Lit2Var(Lit_T(p, iRo, k));
+                int Var_F = Abc_Lit2Var(Lit_F(p, iRo, k));
+                if (c == '0') {
+                    p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)(-Var_T));
+                    p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)( Var_F));
+                } else {
+                    p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)( Var_T));
+                    p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)(-Var_F));
+                }
+            }
+        } else {
+            Vec_IntForEachEntry(p->vCutNodes, NodeId, ci) {
+                int Val = Vec_IntEntry(p->vPropVals, NodeId);
+                if (Val == MINR_VAL_X) continue;
+                int Var_T = Abc_Lit2Var(Lit_T(p, NodeId, k));
+                int Var_F = Abc_Lit2Var(Lit_F(p, NodeId, k));
+                if (Val == MINR_VAL_0) {
+                    p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)(-Var_T));
+                    p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)( Var_F));
+                } else {
+                    p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)( Var_T));
+                    p->incrApi.ipamir_assume(p->pIncrSolver, (int32_t)(-Var_F));
+                }
             }
         }
     }
@@ -2807,7 +2872,7 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
 #if !defined(ABC_NAMESPACE)
 extern "C"
 #endif
-void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin, int fDebugNoPropCut) {
+void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin, int fDebugNoPropCut, int fSpecRegConstraintAtK) {
     Minr_Man_t Man;
     Minr_Man_t * p = &Man;
     memset(p, 0, sizeof(Minr_Man_t));
@@ -2834,6 +2899,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     p->nOptimizeDenseKMax = nOptimizeDenseKMax;
     p->nOptimizeDenseKMin = nOptimizeDenseKMin;
     p->fDebugNoPropCut = fDebugNoPropCut;
+    p->fSpecRegConstraintAtK = fSpecRegConstraintAtK;
 
     // Optional: derive target reset value by random multi-frame simulation (-r)
     // If user didn't explicitly provide -I, pass NULL so random sim starts from random state.

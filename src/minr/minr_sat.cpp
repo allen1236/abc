@@ -163,7 +163,7 @@ void Minr_SatRefine(Minr_Man_t * p)
 
     if (p->vLevel > 0) {
         const char * modeStr = (mode == 1) ? "CEC output equiv" :
-                              (mode == 2) ? "constant cut" :
+                              (mode == 2) ? (Minr_ManUsesSpecRegAtLastTf(p) ? "specified RO @k" : "constant cut") :
                               (mode == 3) ? "eq cut" : "?";
         printf("[Refine] Starting (mode %d: %s%s)...\n", mode, modeStr,
                ((mode == 1 || mode == 3) && p->fRefineBindDc) ? ", bind DC" : "");
@@ -348,16 +348,22 @@ void Minr_SatRefine(Minr_Man_t * p)
         if (pOrVars) ABC_FREE(pOrVars);
 
     } else if (mode == 2) {
-        // Mode 2 (cut): each valid cut node at t=k must match propagated value
+        // Mode 2 (cut): each valid cut node at t=k must match propagated value;
+        // with -S, instead constrain specified target ROs at t=k to 0/1.
         int nValidCut = 0;
-        {
+        if (Minr_ManUsesSpecRegAtLastTf(p)) {
+            int ri;
+            Gia_Obj_t * pRo;
+            Gia_ManForEachRo(pGia, pRo, ri)
+                if (p->pInitStr[ri] == '0' || p->pInitStr[ri] == '1') nValidCut++;
+        } else {
             int NodeId;
             Vec_IntForEachEntry(p->vCutNodes, NodeId, k) {
                 if (Vec_IntEntry(p->vPropVals, NodeId) != MINR_VAL_X) nValidCut++;
             }
         }
         if (nValidCut == 0) {
-            printf("[Refine] No valid cut nodes, skipping.\n");
+            printf("[Refine] No valid last-timeframe constraint nodes, skipping.\n");
             Minr_SatCtxFree(ctx);
             return;
         }
@@ -373,13 +379,28 @@ void Minr_SatRefine(Minr_Man_t * p)
         ctx->nVars = nextVar;
 
         {
-            int idx = 0, NodeId;
-            Vec_IntForEachEntry(p->vCutNodes, NodeId, k) {
-                int Val = Vec_IntEntry(p->vPropVals, NodeId);
-                if (Val == MINR_VAL_X) continue;
-                sat_solver_add_buffer(ctx->pSat, pXorVars[idx],
-                    Minr_SatVar(ctx, NodeId, frameK), Val);
-                idx++;
+            int idx = 0;
+            if (Minr_ManUsesSpecRegAtLastTf(p)) {
+                int ri;
+                Gia_Obj_t * pRo;
+                Gia_ManForEachRo(pGia, pRo, ri) {
+                    char c = p->pInitStr[ri];
+                    if (c != '0' && c != '1') continue;
+                    int Val = (c == '0') ? MINR_VAL_0 : MINR_VAL_1;
+                    int iRo = Gia_ObjId(pGia, pRo);
+                    sat_solver_add_buffer(ctx->pSat, pXorVars[idx],
+                        Minr_SatVar(ctx, iRo, frameK), Val);
+                    idx++;
+                }
+            } else {
+                int NodeId;
+                Vec_IntForEachEntry(p->vCutNodes, NodeId, k) {
+                    int Val = Vec_IntEntry(p->vPropVals, NodeId);
+                    if (Val == MINR_VAL_X) continue;
+                    sat_solver_add_buffer(ctx->pSat, pXorVars[idx],
+                        Minr_SatVar(ctx, NodeId, frameK), Val);
+                    idx++;
+                }
             }
         }
 
@@ -569,9 +590,14 @@ int Minr_SatVerify(Minr_Man_t * p)
 
     Minr_SatCtx_t * ctx = Minr_BuildBinarySatModel(pGia, nSatFrames);
 
-    // Build miter at t=k
+    // Build miter at t=k (constant cut or specified ROs when -S)
     int nValidCut = 0;
-    {
+    if (Minr_ManUsesSpecRegAtLastTf(p)) {
+        int ri;
+        Gia_Obj_t * pRo;
+        Gia_ManForEachRo(pGia, pRo, ri)
+            if (p->pInitStr[ri] == '0' || p->pInitStr[ri] == '1') nValidCut++;
+    } else {
         int NodeId;
         Vec_IntForEachEntry(p->vCutNodes, NodeId, k) {
             if (Vec_IntEntry(p->vPropVals, NodeId) != MINR_VAL_X) nValidCut++;
@@ -579,7 +605,7 @@ int Minr_SatVerify(Minr_Man_t * p)
     }
 
     if (nValidCut == 0) {
-        printf("[SatVerify] No valid cut constraints to check. Trivially PASS.\n");
+        printf("[SatVerify] No valid last-timeframe constraints to check. Trivially PASS.\n");
         Minr_SatCtxFree(ctx);
         return 1;
     }
@@ -591,16 +617,34 @@ int Minr_SatVerify(Minr_Man_t * p)
     int * pXorVars = ABC_ALLOC(int, nValidCut);
 
     {
-        int idx = 0, NodeId;
-        Vec_IntForEachEntry(p->vCutNodes, NodeId, k) {
-            int Val = Vec_IntEntry(p->vPropVals, NodeId);
-            if (Val == MINR_VAL_X) continue;
-            pXorVars[idx] = nextVar++;
-            sat_solver_add_buffer(ctx->pSat,
-                pXorVars[idx],
-                Minr_SatVar(ctx, NodeId, frameK),
-                Val);
-            idx++;
+        int idx = 0;
+        if (Minr_ManUsesSpecRegAtLastTf(p)) {
+            int ri;
+            Gia_Obj_t * pRo;
+            Gia_ManForEachRo(pGia, pRo, ri) {
+                char c = p->pInitStr[ri];
+                if (c != '0' && c != '1') continue;
+                int Val = (c == '0') ? MINR_VAL_0 : MINR_VAL_1;
+                int iRo = Gia_ObjId(pGia, pRo);
+                pXorVars[idx] = nextVar++;
+                sat_solver_add_buffer(ctx->pSat,
+                    pXorVars[idx],
+                    Minr_SatVar(ctx, iRo, frameK),
+                    Val);
+                idx++;
+            }
+        } else {
+            int NodeId;
+            Vec_IntForEachEntry(p->vCutNodes, NodeId, k) {
+                int Val = Vec_IntEntry(p->vPropVals, NodeId);
+                if (Val == MINR_VAL_X) continue;
+                pXorVars[idx] = nextVar++;
+                sat_solver_add_buffer(ctx->pSat,
+                    pXorVars[idx],
+                    Minr_SatVar(ctx, NodeId, frameK),
+                    Val);
+                idx++;
+            }
         }
     }
 

@@ -56,6 +56,7 @@ struct Minr_Man_t_
     int         nOptimizeDenseKMax; // -K N with -O 1: dense sweep inclusive end; -1 = geometric schedule
     int         nOptimizeDenseKMin; // with -K: dense sweep start from -k (CLI default 0 if -k omitted)
     int         fDebugNoPropCut;   // -p: use external EvalMaxSAT binary instead of IPAMIR (.so)
+    int         fSpecRegConstraintAtK; // -S: at t=k constrain specified ROs (target 0/1) instead of constant cut
 
     // Internal State
     Vec_Int_t * vVarMap;    // Mapping: (ObjId, Frame) -> SatVar (Base)
@@ -138,7 +139,24 @@ struct Minr_Man_t_
 
 extern void Minr_ExtractCut( Minr_Man_t * p );
 extern void Minr_ExtractEqCut( Minr_Man_t * p );
-extern void Minr_Solve( Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin, int fDebugNoPropCut );
+extern void Minr_Solve( Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin, int fDebugNoPropCut, int fSpecRegConstraintAtK );
+
+/** 1 iff -S is on and target has at least one specified (0/1) register; else solver falls back to cut at t=k. */
+static inline int Minr_ManUsesSpecRegAtLastTf( Minr_Man_t const * p )
+{
+    Gia_Man_t * pGia;
+    int nRegs, ri;
+    if ( !p || !p->fSpecRegConstraintAtK || !p->pInitStr )
+        return 0;
+    pGia = p->pGia;
+    if ( !pGia )
+        return 0;
+    nRegs = Gia_ManRegNum( pGia );
+    for ( ri = 0; ri < nRegs; ri++ )
+        if ( p->pInitStr[ri] == '0' || p->pInitStr[ri] == '1' )
+            return 1;
+    return 0;
+}
 extern void Minr_SolveOptimize( Minr_Man_t * p );
 extern void Minr_SolveOptimize2( Minr_Man_t * p );
 
