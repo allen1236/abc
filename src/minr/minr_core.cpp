@@ -1462,9 +1462,9 @@ static void Minr_DumpReport(Minr_Man_t * p)
     ti = localtime(&rawtime);
     strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", ti);
 
-    // Runtime (exclude verification if timeSolveEnd set). All ticks: thread CPU (Minr_CpuTicks).
+    // Runtime (exclude verification if timeSolveEnd set). Thread CPU (Minr_CpuTicks) + ext child CPU when external.
     abctime clkEnd = p->timeSolveEnd ? p->timeSolveEnd : Minr_CpuTicks();
-    double totalSec = (double)(clkEnd - p->timeSolveStart) / CLOCKS_PER_SEC;
+    double runtimeCpuSec = (double)(clkEnd - p->timeSolveStart) / CLOCKS_PER_SEC;
     /* -O 1 + timeout_with_best: IPAMIR (-p) may stop slightly before the nominal -t CPU budget elapses;
        floor the optimize-phase portion so runtime_sec ≈ -t + refine (+ tiny overhead). */
     if ( !p->fDebugNoPropCut && p->nOptimizeMode == 1 && p->optStatus == 1 && p->optLastFailSolverStatus == 4 && p->totalTimeout > 0
@@ -1473,12 +1473,22 @@ static void Minr_DumpReport(Minr_Man_t * p)
         abctime optSpan = p->timeTickAfterOptimize - p->timeSolveStart;
         abctime minPhase = (abctime)(p->totalTimeout * (double)CLOCKS_PER_SEC);
         if ( optSpan < minPhase )
-            totalSec = (double)( minPhase + (clkEnd - p->timeTickAfterOptimize) ) / CLOCKS_PER_SEC;
+            runtimeCpuSec = (double)( minPhase + (clkEnd - p->timeTickAfterOptimize) ) / CLOCKS_PER_SEC;
     }
     /* Default external EvalMaxSAT: add child process CPU (not charged to parent thread). */
     if ( p->fDebugNoPropCut )
-        totalSec += p->extSolverChildCpuSec;
+        runtimeCpuSec += p->extSolverChildCpuSec;
     double solverSec = p->fDebugNoPropCut ? p->extSolverChildCpuSec : ( (double)p->timeSolver / CLOCKS_PER_SEC );
+    double runtimeWallSec = 0;
+    if ( p->timeSolveStartWall != (abctime)-1 )
+    {
+        abctime wEnd = p->timeSolveEndWall;
+        if ( wEnd == (abctime)-1 )
+            wEnd = Abc_Clock();
+        if ( wEnd != (abctime)-1 && wEnd >= p->timeSolveStartWall )
+            runtimeWallSec = (double)( wEnd - p->timeSolveStartWall ) / (double)CLOCKS_PER_SEC;
+    }
+    double totalSec = runtimeCpuSec; /* backward-compatible alias */
     double refineSec = (double)p->timeRefine / CLOCKS_PER_SEC;
 
     // Result counts (only meaningful when a solution exists)
@@ -1575,8 +1585,10 @@ static void Minr_DumpReport(Minr_Man_t * p)
         fprintf(pFile, "r_s_before_refine = N/A\n");
     fprintf(pFile, "cut_verified   = %s\n",    (p->solverStatus == 1) ? (p->fVerifyPass ? "pass" : "fail") : "N/A");
     fprintf(pFile, "cec_verified   = %s\n",    (p->solverStatus == 1) ? (p->fCecVerifyPass ? "pass" : "fail") : "N/A");
-    fprintf(pFile, "runtime_sec    = %.3f\n",  totalSec);
-    fprintf(pFile, "solver_sec     = %.3f\n",  solverSec);
+    fprintf(pFile, "runtime_cpu_sec  = %.3f\n",  runtimeCpuSec);
+    fprintf(pFile, "runtime_wall_sec = %.3f\n",  runtimeWallSec);
+    fprintf(pFile, "runtime_sec      = %.3f\n",  totalSec);
+    fprintf(pFile, "solver_sec       = %.3f\n",  solverSec);
     fprintf(pFile, "timestamp      = %s\n",    timebuf);
     if (p->vCutNodes)
         fprintf(pFile, "cut_size       = %d\n", Vec_IntSize(p->vCutNodes));
@@ -1668,19 +1680,21 @@ static void Minr_DumpReport(Minr_Man_t * p)
     // --- [iterations] --- (-O 1 only)
     if (p->nOptimizeMode == 1 && p->vOptIterK && Vec_IntSize(p->vOptIterK) > 0) {
         fprintf(pFile, "\n[iterations]\n");
-        fprintf(pFile, "# k, resets, r_s, time_ms\n");
+        fprintf(pFile, "# k, resets, r_s, cpu_ms, wall_ms\n");
         int itr;
         for (itr = 0; itr < Vec_IntSize(p->vOptIterK); itr++) {
             int iterK      = Vec_IntEntry(p->vOptIterK, itr);
             int iterResets  = Vec_IntEntry(p->vOptIterResets, itr);
             int iterStatus  = Vec_IntEntry(p->vOptIterStatus, itr);
             int iterTimeMs  = Vec_IntEntry(p->vOptIterTimeMs, itr);
+            int iterWallMs  = ( p->vOptIterWallMs && itr < Vec_IntSize(p->vOptIterWallMs) )
+                ? Vec_IntEntry(p->vOptIterWallMs, itr ) : iterTimeMs;
             if (iterResets >= 0) {
                 if (nSpecRegs > 0)
-                    fprintf(pFile, "k=%d, resets=%d, r_s=%.2f%%, %dms\n", iterK, iterResets,
-                            100.0 * (double)iterResets / (double)nSpecRegs, iterTimeMs);
+                    fprintf(pFile, "k=%d, resets=%d, r_s=%.2f%%, cpu_ms=%d, wall_ms=%d\n", iterK, iterResets,
+                            100.0 * (double)iterResets / (double)nSpecRegs, iterTimeMs, iterWallMs);
                 else
-                    fprintf(pFile, "k=%d, resets=%d, r_s=N/A, %dms\n", iterK, iterResets, iterTimeMs);
+                    fprintf(pFile, "k=%d, resets=%d, r_s=N/A, cpu_ms=%d, wall_ms=%d\n", iterK, iterResets, iterTimeMs, iterWallMs);
             } else {
                 const char * pTag;
                 switch (iterStatus) {
@@ -1688,7 +1702,7 @@ static void Minr_DumpReport(Minr_Man_t * p)
                     case 4:  pTag = "timeout"; break;
                     default: pTag = "error";   break;
                 }
-                fprintf(pFile, "k=%d, %s, r_s=N/A, %dms\n", iterK, pTag, iterTimeMs);
+                fprintf(pFile, "k=%d, %s, r_s=N/A, cpu_ms=%d, wall_ms=%d\n", iterK, pTag, iterTimeMs, iterWallMs);
             }
         }
     }
@@ -2291,6 +2305,7 @@ void Minr_SolveOptimize(Minr_Man_t * p)
     p->vOptIterResets  = Vec_IntAlloc(nSchedule);
     p->vOptIterStatus  = Vec_IntAlloc(nSchedule);
     p->vOptIterTimeMs  = Vec_IntAlloc(nSchedule);
+    p->vOptIterWallMs  = Vec_IntAlloc(nSchedule);
 
     int prevResetCount = nRegs;  // for early stop comparison
     int fDenseSweep = (p->nOptimizeDenseKMax >= 0); /* -K: run all k=0..N (or until global timeout) for per-k stats */
@@ -2331,20 +2346,26 @@ void Minr_SolveOptimize(Minr_Man_t * p)
         double solverTimeout = (p->totalTimeout > 0) ? tRemain : 0;
 
         abctime clkIter = Minr_CpuTicks();
+        abctime wIter0 = Abc_Clock();
         double extCpuIter0 = p->extSolverChildCpuSec;
         // Batch MaxSAT (TFI-pruned CNF, cut/PI@k as hard clauses). The incremental
         // path (ipamir_assume for cut / PI-X) matches logically but EvalMaxSAT2022's
         // IPAMIR glue can report spurious UNSAT on large instances (two-phase solve).
         int nResets = Minr_SolveSingleK(p, solverTimeout);
+        abctime wIter1 = Abc_Clock();
         double iterSec = (double)( Minr_CpuTicks() - clkIter ) / (double)CLOCKS_PER_SEC;
         if ( p->fDebugNoPropCut )
             iterSec += p->extSolverChildCpuSec - extCpuIter0;
         int iterMs = (int)( iterSec * 1000.0 );
+        int wallMs = 0;
+        if ( wIter0 != (abctime)-1 && wIter1 != (abctime)-1 && wIter1 >= wIter0 )
+            wallMs = (int)( ( (double)( wIter1 - wIter0 ) * 1000.0 ) / (double)CLOCKS_PER_SEC );
 
         Vec_IntPush(p->vOptIterK, curK);
         Vec_IntPush(p->vOptIterResets, nResets);
         Vec_IntPush(p->vOptIterStatus, p->solverStatus);
         Vec_IntPush(p->vOptIterTimeMs, iterMs);
+        Vec_IntPush(p->vOptIterWallMs, wallMs );
 
         if (nResets >= 0) {
             printf("[Optimize] k=%d: reset_needed=%d (specified=%d, R/S=%.2f%%)\n",
@@ -2769,6 +2790,7 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
 
     // End of "runtime_sec" measurement: after optimize2 solving, before final verification.
     p->timeSolveEnd = Minr_CpuTicks();
+    p->timeSolveEndWall = Abc_Clock();
 
     p->fCecVerifyPass = Minr_CecVerify(p);
     p->optStatus = 0;
@@ -2854,7 +2876,9 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     }
 
     p->timeSolveStart = Minr_CpuTicks();
+    p->timeSolveStartWall = Abc_Clock();
     p->timeSolveEnd = 0;
+    p->timeSolveEndWall = (abctime)-1;
 
     // 0. Pre-processing: Propagation & Cut (shared across all k values)
     // -p uses the same propagation/cut CNF as the default path; only the MaxSAT backend differs.
@@ -2891,6 +2915,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
         }
         // End of "runtime_sec" measurement: after refine, before verification.
         p->timeSolveEnd = Minr_CpuTicks();
+        p->timeSolveEndWall = Abc_Clock();
         // Always run x-simulation verify (computes simRegMismatchWeak/StrongPct)
         p->fVerifyPass = Minr_VerifyResult(p, NULL);
         // If refine modified result, also run SAT verify (overrides cut_verified)
@@ -2904,6 +2929,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     {
         // No solution (or -x off): still stop timer before any verification.
         p->timeSolveEnd = Minr_CpuTicks();
+        p->timeSolveEndWall = Abc_Clock();
     }
 
     Minr_DumpReport( p );
@@ -2923,6 +2949,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     if (p->vOptIterResets) Vec_IntFree(p->vOptIterResets);
     if (p->vOptIterStatus) Vec_IntFree(p->vOptIterStatus);
     if (p->vOptIterTimeMs) Vec_IntFree(p->vOptIterTimeMs);
+    if (p->vOptIterWallMs) Vec_IntFree(p->vOptIterWallMs);
     if (p->vOpt2OuterSegmentTimeMs) Vec_IntFree(p->vOpt2OuterSegmentTimeMs);
     if (p->vOpt2OuterBestResets) Vec_IntFree(p->vOpt2OuterBestResets);
     if (p->vOpt2OuterTargetResets) Vec_IntFree(p->vOpt2OuterTargetResets);

@@ -1,5 +1,7 @@
 """
 彙總 minr experiment 的 detail CSV，產生 *_stat.csv；並另存 *_barplot.csv（長條圖用：
+
+detail 可含 runtime_cpu_sec / runtime_wall_sec；彙總時 runtime 仍以 **CPU** 為準（優先 runtime_cpu_sec，否則 runtime_sec），最後多一欄 **runtime_wall_sec** 平均（舊 CSV 無牆鐘欄則 NA）。
 每列一電路、一 dc 條件；欄位為 benchmark、specified_ratio（目標，100−dc_ratio）、r_f、
 specified_minus_r_f、actual_specified_pct（實際 specified register 數／ff 總數，百分比，與 valid runs 之 specified 平均一致）。
 """
@@ -163,7 +165,11 @@ def main():
 
             specified = _to_int(row.get("specified"))
             required_reset = _to_int(row.get("required_reset"))
-            runtime_sec = _to_float(row.get("runtime_sec"))
+            # 統計用 runtime 一律 CPU：新報表優先 runtime_cpu_sec，舊 CSV 僅有 runtime_sec
+            runtime_sec = _to_float(row.get("runtime_cpu_sec"))
+            if runtime_sec is None:
+                runtime_sec = _to_float(row.get("runtime_sec"))
+            runtime_wall_sec = _to_float(row.get("runtime_wall_sec"))
             refine_sec = _to_float(row.get("refine_sec"))
             k0_r_f_pct = _pct_col(row, "k0_r_f", "k0_reset_ratio")
             r_f_before_pct = _pct_col(row, "r_f_before_refine", "reset_ratio_before_refine")
@@ -215,6 +221,7 @@ def main():
                     "required_reset_before_refine": required_reset_before_refine,
                     "best_k": best_k,
                     "runtime_sec": runtime_sec,
+                    "runtime_wall_sec": runtime_wall_sec,
                     "refine_sec": refine_sec,
                     "r_f": _pct_col(row, "r_f", "reset_ratio"),
                     "k0_r_f": _pct_col(row, "k0_r_f", "k0_reset_ratio"),
@@ -269,6 +276,7 @@ def main():
         "refine_mode",
         "cut_verified",
         "cec_verified",
+        "runtime_wall_sec",
     ]
 
     rows_out = []
@@ -285,6 +293,7 @@ def main():
         rafter = [e.get("r_s") for e in entries]
         resets = [e.get("required_reset") for e in entries]
         runtimes = [e.get("runtime_sec") for e in entries]
+        walltimes = [e.get("runtime_wall_sec") for e in entries]
         refsecs = [e.get("refine_sec") for e in entries]
         rfs = [e.get("r_f") for e in entries]
         k0_rfs = [e.get("k0_r_f") for e in entries]
@@ -335,6 +344,7 @@ def main():
                 "refine_mode": refine_mode,
                 "cut_verified": _ratio_pass(entries, "cut_verified"),
                 "cec_verified": _ratio_pass(entries, "cec_verified"),
+                "runtime_wall_sec": _fmt_num(_mean(walltimes), nd=3),
             }
         )
 

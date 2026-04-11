@@ -140,6 +140,8 @@ def main():
         "r_f_before_refine": r"r_f_before_refine\s*=\s*([\d.]+%?|N/A)",
         "r_s_before_refine": r"r_s_before_refine\s*=\s*([\d.]+%?|N/A)",
         "runtime_sec": r"runtime_sec\s*=\s*([\d.]+)",
+        "runtime_cpu_sec": r"runtime_cpu_sec\s*=\s*([\d.]+)",
+        "runtime_wall_sec": r"runtime_wall_sec\s*=\s*([\d.]+)",
         "cut_verified": r"cut_verified\s*=\s*(\w+)",
         "cec_verified": r"cec_verified\s*=\s*(\w+)",
         "spec_ro_in_cut": r"spec_ro_in_cut\s*=\s*([\d.]+%?)",
@@ -257,6 +259,8 @@ def main():
         "r_f",
         "r_s",
         "runtime_sec",
+        "runtime_cpu_sec",
+        "runtime_wall_sec",
         "opt_status",
         "cut_verified",
         "cec_verified",
@@ -325,6 +329,18 @@ def main():
             r = csv.DictReader(f)
             if r.fieldnames:
                 output_headers = list(r.fieldnames)
+                oh = output_headers
+                if "runtime_cpu_sec" not in oh:
+                    ins = oh.index("runtime_sec") + 1 if "runtime_sec" in oh else len(oh)
+                    oh.insert(ins, "runtime_cpu_sec")
+                if "runtime_wall_sec" not in oh:
+                    ins = (
+                        oh.index("runtime_cpu_sec") + 1
+                        if "runtime_cpu_sec" in oh
+                        else len(oh)
+                    )
+                    oh.insert(ins, "runtime_wall_sec")
+                output_headers = oh
             for row in r:
                 if _is_timeout_row(row):
                     circuit = (row.get("circuit") or "").strip()
@@ -472,6 +488,12 @@ def main():
             out["r_f"] = parsed.get("r_f", "NA")
             out["r_s"] = parsed.get("r_s", "NA")
             out["runtime_sec"] = parsed.get("runtime_sec", "NA")
+            out["runtime_cpu_sec"] = parsed.get("runtime_cpu_sec", "NA")
+            out["runtime_wall_sec"] = parsed.get("runtime_wall_sec", "NA")
+            if out["runtime_cpu_sec"] == "NA" and out["runtime_sec"] != "NA":
+                out["runtime_cpu_sec"] = out["runtime_sec"]
+            if out["runtime_wall_sec"] == "NA" and out["runtime_sec"] != "NA":
+                out["runtime_wall_sec"] = out["runtime_sec"]
             out["opt_status"] = parsed.get("opt_status", "NA") if OPTIMIZE_MODE else "NA"
             out["cut_verified"] = parsed.get("cut_verified", "NA")
             out["cec_verified"] = parsed.get("cec_verified", "NA")

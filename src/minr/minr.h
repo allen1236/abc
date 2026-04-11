@@ -88,7 +88,9 @@ struct Minr_Man_t_
     int         fVerifyPass;    // cut-based verification result (1=pass, 0=fail)
     int         fCecVerifyPass; // CEC-based verification result (1=pass, 0=fail)
     abctime     timeSolveStart; // timer start (after target state derived); thread CPU ticks
+    abctime     timeSolveStartWall; // Abc_Clock() at same boundary as timeSolveStart (for runtime_wall_sec)
     abctime     timeSolveEnd;   // timer end (before verification); 0 = use current time; CPU ticks
+    abctime     timeSolveEndWall;   // Abc_Clock() when timeSolveEnd was taken (for runtime_wall_sec)
     abctime     timeTickAfterOptimize; // after Minr_SolveOptimize (-O 1); 0 if N/A; for runtime_sec floor
     abctime     timeSolver;     // MaxSAT: thread CPU around ipamir_solve, or parent overhead around external wait4
     double      extSolverChildCpuSec; // cumulative EvalMaxSAT child user+sys CPU (wait4); external binary only; drives -t + report
@@ -110,7 +112,8 @@ struct Minr_Man_t_
     Vec_Int_t * vOptIterK;      // k value per iteration
     Vec_Int_t * vOptIterResets; // reset count (-1 = no solution)
     Vec_Int_t * vOptIterStatus; // solverStatus per iteration
-    Vec_Int_t * vOptIterTimeMs; // iteration wall-clock time in ms
+    Vec_Int_t * vOptIterTimeMs; // iteration CPU-ish time in ms (thread + ext child delta when external)
+    Vec_Int_t * vOptIterWallMs; // iteration wall elapsed ms (Abc_Clock around Minr_SolveSingleK)
 
     // -O 2: per-outer-iteration log (each wec row = one outer iter)
     Vec_Int_t * vOpt2OuterSegmentTimeMs;  // segment time per outer

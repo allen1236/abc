@@ -6,7 +6,7 @@
 避免 minr 用滿 CPU 預算前就被 Python 先殺掉。
 
 輸出兩個檔案：
-1) *_detail_*.csv：每個 (電路, seed, dc_ratio) 一列，含各 k 的 reset / r_s / runtime_sec。
+1) *_detail_*.csv：每個 (電路, seed, dc_ratio) 一列，含各 k 的 reset / r_s / runtime_sec（與 runtime_cpu_sec 同義）/ runtime_cpu_sec / runtime_wall_sec。
 2) *_pivot_*.csv：每列一個 k；欄位先 k，再 **依電路** 輪流：每個電路一段為
    該電路各 dc 的 runtime → 該電路各 dc 的 R/F → 該電路各 dc 的 R/S，
    然後下一個電路重複同樣順序。同一 metric 內 dc 欄依 specified 由大到小（S100 在前）。
@@ -52,7 +52,7 @@ EXP_DIR = os.path.join(SCRIPT_DIR, "exp")
 ABC_BINARY = os.path.join(ROOT_DIR, "abc")
 # 傳給 &minr 的 -t（thread-CPU 秒）；外層 subprocess.wait 會多等 PROC_WAIT_EXTRA_SEC
 TOTAL_TIMEOUT = 800
-PROC_WAIT_EXTRA_SEC = 200
+PROC_WAIT_EXTRA_SEC = 100
 
 K_MIN = 0  # 掃描 k 下限（含）
 K_MAX = 40  # 掃描 k 上限（含）；每個 k 各跑一次 single-k solve
@@ -137,6 +137,8 @@ def merge_job_results(job_results: list, headers: list, k_min: int, k_max: int) 
         kk = jr["kk"]
         row[f"k{kk}_reset"] = jr["k_reset"]
         row[f"k{kk}_runtime_sec"] = jr["k_runtime_sec"]
+        row[f"k{kk}_runtime_cpu_sec"] = jr.get("k_runtime_cpu_sec", "NA")
+        row[f"k{kk}_runtime_wall_sec"] = jr.get("k_runtime_wall_sec", "NA")
     for row in buckets.values():
         spec = row.get("specified", "NA")
         for kk in range(k_min, k_max + 1):
@@ -174,22 +176,53 @@ def _safe_float_str(x: str) -> str:
     return s
 
 
+def _iter_row_ms(cpu_ms: int, wall_ms=None) -> dict:
+    wall_ms = wall_ms if wall_ms is not None else cpu_ms
+    cpu_s = f"{cpu_ms / 1000.0:.6f}"
+    wall_s = f"{wall_ms / 1000.0:.6f}"
+    return {
+        "runtime_sec": cpu_s,
+        "runtime_cpu_sec": cpu_s,
+        "runtime_wall_sec": wall_s,
+    }
+
+
 def parse_iterations_block(content: str):
-    """Parse [iterations] lines into { k: {reset, runtime_sec} }（reset = 該 k 的 required_reset）。"""
+    """Parse [iterations] → { k: { reset, runtime_sec, runtime_cpu_sec, runtime_wall_sec } }。"""
     out = {}
     sec = re.search(r"\[iterations\]\s*\n(.*?)(?:\n\[|\Z)", content, re.S)
     if not sec:
         return out
     block = sec.group(1)
+    # New: k=1, resets=3, r_s=40.00%, cpu_ms=2, wall_ms=5
+    for m in re.finditer(
+        r"^k=(\d+),\s*resets=(\d+),\s*r_s=(N/A|[\d.]+%),\s*cpu_ms=(\d+),\s*wall_ms=(\d+)\s*$",
+        block,
+        re.M,
+    ):
+        k = int(m.group(1))
+        t = _iter_row_ms(int(m.group(4)), int(m.group(5)))
+        out[k] = {"reset": m.group(2), **t}
+    # New fail: k=1, unsat, r_s=N/A, cpu_ms=2, wall_ms=5
+    for m in re.finditer(
+        r"^k=(\d+),\s*(unsat|timeout|error),\s*r_s=N/A,\s*cpu_ms=(\d+),\s*wall_ms=(\d+)\s*$",
+        block,
+        re.M,
+    ):
+        k = int(m.group(1))
+        if k in out:
+            continue
+        t = _iter_row_ms(int(m.group(3)), int(m.group(4)))
+        out[k] = {"reset": "NA", **t}
     # k=1, resets=3, r_s=40.00%, 2ms
     for m in re.finditer(
         r"^k=(\d+),\s*resets=(\d+),\s*r_s=(N/A|[\d.]+%),\s*(\d+)ms\s*$", block, re.M
     ):
         k = int(m.group(1))
-        out[k] = {
-            "reset": m.group(2),
-            "runtime_sec": f"{int(m.group(4)) / 1000.0:.6f}",
-        }
+        if k in out:
+            continue
+        t = _iter_row_ms(int(m.group(4)))
+        out[k] = {"reset": m.group(2), **t}
     # Legacy: k=1, resets=3, reduction=40.00%, 2ms
     for m in re.finditer(
         r"^k=(\d+),\s*resets=(\d+),\s*reduction=(N/A|[\d.]+%),\s*(\d+)ms\s*$", block, re.M
@@ -197,38 +230,39 @@ def parse_iterations_block(content: str):
         k = int(m.group(1))
         if k in out:
             continue
-        out[k] = {
-            "reset": m.group(2),
-            "runtime_sec": f"{int(m.group(4)) / 1000.0:.6f}",
-        }
+        t = _iter_row_ms(int(m.group(4)))
+        out[k] = {"reset": m.group(2), **t}
     # Legacy: k=1, resets=3, 2ms
     for m in re.finditer(r"^k=(\d+),\s*resets=(\d+),\s*(\d+)ms\s*$", block, re.M):
         k = int(m.group(1))
         if k in out:
             continue
-        out[k] = {
-            "reset": m.group(2),
-            "runtime_sec": f"{int(m.group(3)) / 1000.0:.6f}",
-        }
+        t = _iter_row_ms(int(m.group(3)))
+        out[k] = {"reset": m.group(2), **t}
     # Failure: k=1, unsat, r_s=N/A, 2ms
     for m in re.finditer(
         r"^k=(\d+),\s*(?:unsat|timeout|error),\s*r_s=N/A,\s*(\d+)ms\s*$", block, re.M
     ):
         k = int(m.group(1))
-        out[k] = {"reset": "NA", "runtime_sec": f"{int(m.group(2)) / 1000.0:.6f}"}
+        if k in out:
+            continue
+        t = _iter_row_ms(int(m.group(2)))
+        out[k] = {"reset": "NA", **t}
     for m in re.finditer(
         r"^k=(\d+),\s*(?:unsat|timeout|error),\s*reduction=N/A,\s*(\d+)ms\s*$", block, re.M
     ):
         k = int(m.group(1))
         if k in out:
             continue
-        out[k] = {"reset": "NA", "runtime_sec": f"{int(m.group(2)) / 1000.0:.6f}"}
+        t = _iter_row_ms(int(m.group(2)))
+        out[k] = {"reset": "NA", **t}
     # Legacy fail: k=1, unsat, 2ms
     for m in re.finditer(r"^k=(\d+),\s*(unsat|timeout|error),\s*(\d+)ms\s*$", block, re.M):
         k = int(m.group(1))
         if k in out:
             continue
-        out[k] = {"reset": "NA", "runtime_sec": f"{int(m.group(3)) / 1000.0:.6f}"}
+        t = _iter_row_ms(int(m.group(3)))
+        out[k] = {"reset": "NA", **t}
     return out
 
 
@@ -251,14 +285,20 @@ def parse_flat_report_for_k(content: str, expect_k: int):
         return None
     rr = re.search(r"(?m)^required_reset\s*=\s*(\S+)", block)
     rt = re.search(r"(?m)^runtime_sec\s*=\s*([\d.]+)", block)
+    rtc = re.search(r"(?m)^runtime_cpu_sec\s*=\s*([\d.]+)", block)
+    rtw = re.search(r"(?m)^runtime_wall_sec\s*=\s*([\d.]+)", block)
     if not rr or not rt:
         return None
     reset_s = rr.group(1).strip()
     if reset_s.upper() in ("N/A", "NA"):
         reset_s = "NA"
+    cpu_s = rtc.group(1).strip() if rtc else rt.group(1).strip()
+    wall_s = rtw.group(1).strip() if rtw else cpu_s
     return {
         "reset": reset_s,
-        "runtime_sec": rt.group(1).strip(),
+        "runtime_sec": cpu_s,
+        "runtime_cpu_sec": cpu_s,
+        "runtime_wall_sec": wall_s,
     }
 
 
@@ -338,7 +378,15 @@ def main():
     base_headers = ["circuit", "nodes", "ff", "dc_ratio", "specified", "seed"]
     k_headers = []
     for kk in range(K_MIN, K_MAX + 1):
-        k_headers.extend([f"k{kk}_reset", f"k{kk}_r_s", f"k{kk}_runtime_sec"])
+        k_headers.extend(
+            [
+                f"k{kk}_reset",
+                f"k{kk}_r_s",
+                f"k{kk}_runtime_sec",
+                f"k{kk}_runtime_cpu_sec",
+                f"k{kk}_runtime_wall_sec",
+            ]
+        )
     headers = base_headers + k_headers
 
     def merged_metrics_for_k(matches: list, kk: int) -> tuple:
@@ -523,11 +571,16 @@ def main():
                 by_k = {}
 
             if kk in by_k:
-                k_reset = by_k[kk]["reset"]
-                k_runtime_sec = by_k[kk]["runtime_sec"]
+                bk = by_k[kk]
+                k_reset = bk["reset"]
+                k_runtime_sec = bk["runtime_sec"]
+                k_runtime_cpu_sec = bk.get("runtime_cpu_sec", k_runtime_sec)
+                k_runtime_wall_sec = bk.get("runtime_wall_sec", k_runtime_sec)
             else:
                 k_reset = "NA"
                 k_runtime_sec = "NA"
+                k_runtime_cpu_sec = "NA"
+                k_runtime_wall_sec = "NA"
 
             status = "timeout" if is_timeout else ("ok" if parsed else "fail")
             return {
@@ -540,6 +593,8 @@ def main():
                 "specified": parsed.get("specified_regs", "NA"),
                 "k_reset": k_reset,
                 "k_runtime_sec": k_runtime_sec,
+                "k_runtime_cpu_sec": k_runtime_cpu_sec,
+                "k_runtime_wall_sec": k_runtime_wall_sec,
                 "_status": status,
             }
         finally:
