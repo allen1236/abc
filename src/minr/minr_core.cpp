@@ -2394,6 +2394,12 @@ void Minr_SolveOptimize(Minr_Man_t * p)
             if (tRemain <= 1.0) {
                 printf( "[Optimize] %s time budget exhausted (%.1fs elapsed). Stopping.\n",
                         p->fDebugNoPropCut ? "CPU" : "Thread-CPU (IPAMIR)", elapsed );
+                /* Had a feasible best from an earlier k but did not finish the k-schedule:
+                   report timeout_with_best, not found_best (optStatus was left 0 otherwise). */
+                if (p->bestK >= 0) {
+                    p->optStatus = 1;
+                    p->optLastFailSolverStatus = 4;
+                }
                 break;
             }
         }
