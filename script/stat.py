@@ -114,6 +114,9 @@ def main():
 
     groups = {}
     mismatch_by_dc: dict[int, dict[str, int]] = {}
+    # (circuit, seed, dc_ratio) -> {"runtime": [...], "refine": [...]}
+    pair_dc_runs: dict[tuple[str, int, int], dict[str, list]] = {}
+    dc_seen: set[int] = set()
 
     for path in args.inputs:
         for row in _read_rows(path):
@@ -121,6 +124,7 @@ def main():
             dc_ratio = _to_int(row.get("dc_ratio"))
             if circuit == "" or dc_ratio is None:
                 continue
+            dc_seen.add(dc_ratio)
 
             key = (circuit, dc_ratio)
             g = groups.setdefault(
@@ -171,6 +175,7 @@ def main():
                 runtime_sec = _to_float(row.get("runtime_sec"))
             runtime_wall_sec = _to_float(row.get("runtime_wall_sec"))
             refine_sec = _to_float(row.get("refine_sec"))
+            seed_i = _to_int(row.get("seed"))
             k0_r_f_pct = _pct_col(row, "k0_r_f", "k0_reset_ratio")
             r_f_before_pct = _pct_col(row, "r_f_before_refine", "reset_ratio_before_refine")
             best_k = _to_int(row.get("best_k"))
@@ -181,6 +186,14 @@ def main():
 
             if runtime_sec is None or r_s is None:
                 continue
+
+            # collect per (benchmark, seed, dc) for "all dc runtime<600" filtering
+            if seed_i is not None:
+                pd_key = (circuit, seed_i, dc_ratio)
+                agg_pd = pair_dc_runs.setdefault(pd_key, {"runtime": [], "refine": []})
+                agg_pd["runtime"].append(runtime_sec)
+                if refine_sec is not None:
+                    agg_pd["refine"].append(refine_sec)
 
             required_reset_k0 = None
             if k0_r_f_pct is not None and ff is not None:
@@ -355,6 +368,78 @@ def main():
         w.writerows(rows_out)
 
     print(f"Stat saved to {out_path}")
+
+    # Filter benchmark-seed pairs that are fast (<600s) under every dc_ratio, then average by dc_ratio.
+    # For each (circuit, seed) we require it appears in ALL dc_seen and all its runs have runtime_sec < 600.
+    if dc_seen and pair_dc_runs:
+        dc_list = sorted(dc_seen)
+        pair_keys = sorted(set((c, s) for (c, s, _d) in pair_dc_runs.keys()))
+        eligible_pairs = []
+        for circuit, seed_i in pair_keys:
+            ok = True
+            for dc in dc_list:
+                pd_key = (circuit, seed_i, dc)
+                if pd_key not in pair_dc_runs:
+                    ok = False
+                    break
+                rts = pair_dc_runs[pd_key]["runtime"]
+                if not rts:
+                    ok = False
+                    break
+                # "每個 dc 下 runtime 都小於 600": interpret as all valid runs under that dc must be <600
+                if any(rt >= 600.0 for rt in rts):
+                    ok = False
+                    break
+            if ok:
+                eligible_pairs.append((circuit, seed_i))
+
+        by_dc_rows = []
+        for dc in dc_list:
+            per_pair_runtime = []
+            per_pair_refine = []
+            for circuit, seed_i in eligible_pairs:
+                pd_key = (circuit, seed_i, dc)
+                rts = pair_dc_runs[pd_key]["runtime"]
+                ref = pair_dc_runs[pd_key]["refine"]
+                per_pair_runtime.append(_mean(rts))
+                per_pair_refine.append(_mean(ref))
+            avg_runtime = _mean(per_pair_runtime)
+            avg_refine = _mean(per_pair_refine)
+            avg_maxsat = None
+            if avg_runtime is not None:
+                avg_maxsat = avg_runtime - (avg_refine or 0.0)
+            by_dc_rows.append(
+                {
+                    "dc_ratio": str(dc),
+                    "specified_ratio": str(100 - int(dc)),
+                    "n_benchmark_seed": str(len(eligible_pairs)),
+                    "avg_runtime_sec": _fmt_num(avg_runtime, nd=3),
+                    "avg_refine_sec": _fmt_num(avg_refine, nd=3),
+                    "avg_maxsat_sec": _fmt_num(avg_maxsat, nd=3),
+                }
+            )
+
+        root_noext, _ext = os.path.splitext(out_path)
+        if root_noext.endswith("_stat"):
+            fast_path = root_noext[:-5] + "_fast_pairs_runtime.csv"
+        else:
+            fast_path = root_noext + "_fast_pairs_runtime.csv"
+        with open(fast_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "specified_ratio",
+                    "dc_ratio",
+                    "n_benchmark_seed",
+                    "avg_runtime_sec",
+                    "avg_refine_sec",
+                    "avg_maxsat_sec",
+                ],
+            )
+            w.writeheader()
+            # specified_ratio 大到小
+            w.writerows(sorted(by_dc_rows, key=lambda r: _to_int(r["specified_ratio"]) or -1, reverse=True))
+        print(f"Fast-pairs runtime saved to {fast_path}")
 
     # barplot.csv：依電路分組，組內 dc_ratio 由小到大（目標 specified 由大到小）
     root_noext, _ext = os.path.splitext(out_path)
