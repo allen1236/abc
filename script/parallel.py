@@ -3,11 +3,11 @@
 各 job 回傳一列；主程式依完成順序寫入 detail CSV。
 
 用法:
-  python3 script/parallel.py --prefix <prefix> [--max-workers N]
-  python3 script/parallel.py --csv <existing_detail.csv> --prefix <new_prefix> [--max-workers N]
+  python3 script/parallel.py --prefix <prefix> [--j N]
+  python3 script/parallel.py --csv <existing_detail.csv> --prefix <new_prefix> [--j N]
 
 環境變數:
-  MINR_EXP_WORKERS  預設並行數（預設 8）；若命令列有給第二個數字則覆寫。
+  MINR_EXP_WORKERS  預設並行數；命令列 --j / --max-workers 會覆寫。
 
 終端機狀態標籤（每個 job 結束時）:
   [ok]      abc 正常結束，且 log 裡至少解析到一個欄位（patterns 有命中）
@@ -40,12 +40,39 @@ _PY39 = sys.version_info >= (3, 9)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BENCHMARKS = [
+    # iscas89（依電路編號由小到大）
+    "iscas89/s27.aig",
+    "iscas89/s298.aig",
+    "iscas89/s344.aig",
+    "iscas89/s349.aig",
+    "iscas89/s382.aig",
+    "iscas89/s386.aig",
+    "iscas89/s400.aig",
+    "iscas89/s420.aig",
+    "iscas89/s444.aig",
+    "iscas89/s510.aig",
+    "iscas89/s526.aig",
+    "iscas89/s641.aig",
+    "iscas89/s713.aig",
+    "iscas89/s820.aig",
+    "iscas89/s832.aig",
+    "iscas89/s838.aig",
+    "iscas89/s953.aig",
+    "iscas89/s1196.aig",
+    "iscas89/s1238.aig",
+    "iscas89/s1423.aig",
+    "iscas89/s1488.aig",
+    "iscas89/s5378.aig",
+
     "iscas89/s9234.aig",
     "iscas89/s13207.aig",
+    "iscas89/s15850.aig",
+    "iscas89/s35932.aig",
     "iscas89/s38417.aig",
-    "itc99/b12.aig",
-    "itc99/b20.aig",
-    "itc99/b21.aig",
+    "iscas89/s38584.aig",
+
+    # itc99（依電路編號由小到大）
+
     "itc99/b01.aig",
     "itc99/b02.aig",
     "itc99/b03.aig",
@@ -57,39 +84,25 @@ BENCHMARKS = [
     "itc99/b09.aig",
     "itc99/b10.aig",
     "itc99/b11.aig",
+
+    "itc99/b12.aig",
     "itc99/b13.aig",
     "itc99/b14.aig",
-    "iscas89/s1196.aig",
-    "iscas89/s1238.aig",
-    "iscas89/s1423.aig",
-    "iscas89/s1488.aig",
-    "iscas89/s15850.aig",
-    "iscas89/s27.aig",
-    "iscas89/s298.aig",
-    "iscas89/s344.aig",
-    "iscas89/s349.aig",
-    "iscas89/s35932.aig",
-    "iscas89/s382.aig",
-    "iscas89/s386.aig",
-    "iscas89/s400.aig",
-    "iscas89/s420.aig",
-    "iscas89/s444.aig",
-    "iscas89/s510.aig",
-    "iscas89/s526.aig",
-    "iscas89/s5378.aig",
-    "iscas89/s641.aig",
-    "iscas89/s713.aig",
-    "iscas89/s820.aig",
-    "iscas89/s832.aig",
-    "iscas89/s838.aig",
-    "iscas89/s953.aig",
     "itc99/b15.aig",
     "itc99/b17.aig",
     "itc99/b18.aig",
     "itc99/b19.aig",
+    "itc99/b20.aig",
+    "itc99/b21.aig",
     "itc99/b22.aig",
-    # "iscas89/s38584.aig",
 ]
+
+ALWAYS_CORE_ONLY = [
+    "iscas89/s38584.aig",
+]
+ALWAYS_CORE_ONLY_STEMS = {
+    os.path.splitext(os.path.basename(path))[0] for path in ALWAYS_CORE_ONLY
+}
 
 BENCHMARK_DIR = os.path.join(ROOT_DIR, "benchmarks")
 SCRIPT_DIR = os.path.join(ROOT_DIR, "script")
@@ -106,17 +119,17 @@ REFINE_MODE = 1
 REFINE_BIND_DC = True
 REFINE_CONF_LIMIT = 10000
 REFINE_CORE_ONLY = False
-OTHER_ARGS = ""
+OTHER_ARGS = "-l 500 -L 20"
 OPTIMIZE_MODE = 1
-DC_RATIO = [0, 25, 50, 75]
+DC_RATIO = [0]
 TOTAL_TIMEOUT = 600
 
-# 預設 8；可用 MINR_EXP_WORKERS 或命令列第二參數覆寫
+# 預設 worker 數；可用 MINR_EXP_WORKERS 或命令列 --j / --max-workers 覆寫
 def _default_max_workers() -> int:
     w = os.environ.get("MINR_EXP_WORKERS", "").strip()
     if w.isdigit():
         return max(1, int(w))
-    return 12
+    return 4
 
 
 MAX_WORKERS = _default_max_workers()
@@ -157,7 +170,7 @@ def main():
         patterns["best_k"] = r"best_k\s*=\s*(\d+)"
         patterns["opt_status"] = r"opt_status\s*=\s*(\w+)"
 
-    def build_log_suffix(seed: int, dc_pct: int):
+    def build_log_suffix(seed: int, dc_pct: int, force_core_only: bool = False):
         parts = []
         if OPTIMIZE_MODE:
             parts.append(f"O{OPTIMIZE_MODE}")
@@ -173,7 +186,7 @@ def main():
                 parts.append("X")
         if REFINE_MODE > 0:
             parts.append(f"c{REFINE_CONF_LIMIT}")
-            if REFINE_CORE_ONLY:
+            if REFINE_CORE_ONLY or force_core_only:
                 parts.append("C")
         if TOTAL_TIMEOUT > 0:
             parts.append(f"t{TOTAL_TIMEOUT}")
@@ -224,17 +237,24 @@ def main():
         help="If set, do NOT use BENCHMARKS/SEEDS/DC_RATIO grid; instead rerun only timeout rows in this CSV.",
     )
     ap.add_argument(
+        "--j",
+        type=int,
+        default=0,
+        help="Override max parallel workers.",
+    )
+    ap.add_argument(
         "--max-workers",
         type=int,
         default=0,
-        help="Override max parallel workers (default: env MINR_EXP_WORKERS or script default).",
+        help="Backward-compatible alias for --j.",
     )
     args = ap.parse_args()
 
     prefix_base = (args.prefix or "exp").strip()
     prefix_base = re.sub(r"[^\w\-]", "_", prefix_base) if prefix_base else "exp"
 
-    max_workers = MAX_WORKERS if not args.max_workers else max(1, int(args.max_workers))
+    n_jobs_arg = args.j or args.max_workers
+    max_workers = MAX_WORKERS if not n_jobs_arg else max(1, int(n_jobs_arg))
 
     detail_csv = build_csv_path(f"{prefix_base}_parallel_detail_")
 
@@ -242,6 +262,9 @@ def main():
         base = os.path.basename(path_or_name)
         stem, _ext = os.path.splitext(base)
         return stem
+
+    def force_core_only_for_bench(bench: str) -> bool:
+        return bench in ALWAYS_CORE_ONLY or bench_stem(bench) in ALWAYS_CORE_ONLY_STEMS
 
     default_headers = [
         "circuit",
@@ -404,15 +427,17 @@ def main():
             )
 
         src_aig = os.path.join(BENCHMARK_DIR, bench)
+        force_core_only = force_core_only_for_bench(bench)
 
-        log_suffix = build_log_suffix(seed, dc_pct)
+        log_suffix = build_log_suffix(seed, dc_pct, force_core_only)
         log_path = os.path.join(LOG_DIR, f"{stem}{log_suffix}")
 
         dc_arg = f"-D {dc_pct}" if dc_pct > 0 else ""
         refine_arg = f"-x {REFINE_MODE}" if REFINE_MODE > 0 else ""
         bind_arg = " -X" if (REFINE_MODE > 0 and REFINE_BIND_DC) else ""
         conf_arg = f" -c {REFINE_CONF_LIMIT}" if (REFINE_MODE > 0 and REFINE_CONF_LIMIT is not None) else ""
-        core_only_arg = " -C" if (REFINE_MODE > 0 and REFINE_CORE_ONLY) else ""
+        effective_core_only = REFINE_CORE_ONLY or force_core_only
+        core_only_arg = " -C" if (REFINE_MODE > 0 and effective_core_only) else ""
         timeout_arg = f"-t {TOTAL_TIMEOUT}" if TOTAL_TIMEOUT > 0 else ""
 
         if OPTIMIZE_MODE:

@@ -66,7 +66,7 @@
 ## 3. 完整參數列表（`src/minr/minr_cmd.cpp`）
 
 ```
-&minr [-k <int>] [-I <string>] [-r [<seed>]] [-R <num>] [-D <pct>]
+&minr [-k <int>] [-I <string>] [-r [<seed>]] [-R <num>] [-D <pct>] [-l <N>] [-L <T>]
       [-o <file>] [-v <level>] [-t <sec>]
       [-x <mode>] [-X] [-c <nConf>] [-C]
       [-O <mode>] [-K <N>]
@@ -83,6 +83,13 @@
 - **`-r [seed]`**：以 random simulation 產生 reachable \(\hat\sigma\)。
 - **`-R <num>`**：simulation 的 timeframe 數（預設 `k`）；`0` 表示不模擬、直接隨機 \(\hat\sigma\)。
 - **`-D <pct>`**：在 `-r` 產生的 \(\hat\sigma\) 上，隨機將 `pct%` 的 **reset registers** 改為 free（\(X\)）；`pct` ∈ 1..99。
+- **`-l <N>`** / **`-L <T>`**：在 `-r`（及可選 `-D`）之後，以 PO golden 比對剔除 redundant specified register。對 \(\hat\sigma\) 跑 `N` 次 iteration、每次 `T` cycle 隨機 simulation；若翻轉某 specified register 的 t=0 初始值不影響任何 cycle 的 PO，則將該 bit 改為 free（`x`）。**必須同時給定 `-l` 與 `-L`，且需搭配 `-r`**。與 `-R`（target 產生深度）獨立。
+
+範例：
+
+```bash
+./abc -c "read_aiger benchmarks/iscas89/s27.aig; &get; &minr -k 8 -r 0 -R 100 -D 50 -l 10 -L 200 -o _/tmp/minr.log"
+```
 
 ### 3.3 SAT-based refinement（§4.4）
 
@@ -121,6 +128,7 @@
 - `k`：採用的 timeframe length
 - `target_state`：**initial reset vector** \(\hat\sigma\)
 - `random_seed` / `random_cycles` / `dontcare_pct`：`-r/-R/-D` 相關
+- `prune_iters` / `prune_cycles` / `target_pre_prune` / `prune_necessary`：`-l/-L` 相關（僅啟用時）
 - `refine_mode`：`-x`
 - `last_tf_constr`：`cut`（target-induced constant cut）或 `specified_ro`
 

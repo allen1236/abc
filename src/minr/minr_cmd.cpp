@@ -45,9 +45,13 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
     int nOptimizeDenseKMin = 0;  // with -K: start k from -k (set below), else 0
     int fDebugNoPropCut = 1;     // backend selector: 1=external binary (default), 0=IPAMIR (.so)
     int fSpecRegConstraintAtK = 0; // -S: last-tf hard constraints on specified ROs instead of cut
+    int nPruneIters = -1;       // -l <N> redundant-reset pruning iterations
+    int nPruneCycles = -1;      // -L <T> cycles per pruning simulation
+    int fPruneItersSet = 0;
+    int fPruneCyclesSet = 0;
 
     Extra_UtilGetoptReset();
-    while ((c = Extra_UtilGetopt(argc, argv, "k:I:D:v:r:R:o:t:x:O:c:CXK:hpS")) != EOF) {
+    while ((c = Extra_UtilGetopt(argc, argv, "k:I:D:v:r:R:o:t:x:O:c:CXK:hpSl:L:")) != EOF) {
         switch (c) {
             case 'k':
                 if (globalUtilOptarg == NULL || globalUtilOptarg[0] == '\0') {
@@ -164,6 +168,30 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
                     goto usage;
                 }
                 break;
+            case 'l':
+                if (globalUtilOptarg == NULL || globalUtilOptarg[0] == '\0') {
+                    Abc_Print(-1, "Command line switch \"-l\" should be followed by a positive integer.\n");
+                    goto usage;
+                }
+                nPruneIters = atoi(globalUtilOptarg);
+                fPruneItersSet = 1;
+                if (nPruneIters < 1) {
+                    Abc_Print(-1, "Error: -l must be >= 1.\n");
+                    goto usage;
+                }
+                break;
+            case 'L':
+                if (globalUtilOptarg == NULL || globalUtilOptarg[0] == '\0') {
+                    Abc_Print(-1, "Command line switch \"-L\" should be followed by a positive integer.\n");
+                    goto usage;
+                }
+                nPruneCycles = atoi(globalUtilOptarg);
+                fPruneCyclesSet = 1;
+                if (nPruneCycles < 1) {
+                    Abc_Print(-1, "Error: -L must be >= 1.\n");
+                    goto usage;
+                }
+                break;
             case 'h':
                 goto usage;
             default:
@@ -259,20 +287,30 @@ int Minr_CommandAbc9Minr(Abc_Frame_t* pAbc, int argc, char** argv) {
         Abc_Print(-1, "Error: -K (dense k sweep 0..N) requires -O 1.\n");
         return 0;
     }
+    if (fPruneItersSet != fPruneCyclesSet) {
+        Abc_Print(-1, "Error: -l and -L must be specified together.\n");
+        return 0;
+    }
+    if (fPruneItersSet && !fRandTarget) {
+        Abc_Print(-1, "Error: -l/-L require -r (random target derivation).\n");
+        return 0;
+    }
 
     // Call Minr_Solve function (MaxSAT via IPAMIR .so at MINR_IPAMIR_SO_DEFAULT)
-    Minr_Solve(pGia, nFrames, pInitStr, fExplicitInit, fRandTarget, nRandomSim, vLevel, seed, nRefineMode, fRefineBindDc, nRefineConfLimit, fRefineCoreOnly, pReportFile, nOptimizeMode, totalTimeout, nDontCarePercent, nOptimizeDenseKMax, nOptimizeDenseKMin, fDebugNoPropCut, fSpecRegConstraintAtK);
+    Minr_Solve(pGia, nFrames, pInitStr, fExplicitInit, fRandTarget, nRandomSim, vLevel, seed, nRefineMode, fRefineBindDc, nRefineConfLimit, fRefineCoreOnly, pReportFile, nOptimizeMode, totalTimeout, nDontCarePercent, nOptimizeDenseKMax, nOptimizeDenseKMin, fDebugNoPropCut, fSpecRegConstraintAtK, nPruneIters, nPruneCycles);
 
     if (pInitStrAlloc) free(pInitStrAlloc);
     return 0;
 
 usage:
-    Abc_Print(-2, "usage: &minr [-k <int>] [-I <string>] [-r [<seed>]] [-R <num>] [-D <pct>] [-o <file>] [-v <level>] [-t <sec>] [-x <mode>] [-c <nConf>] [-C] [-O <mode>] [-K <N>] [-p] [-S]\n");
+    Abc_Print(-2, "usage: &minr [-k <int>] [-I <string>] [-r [<seed>]] [-R <num>] [-D <pct>] [-l <N>] [-L <T>] [-o <file>] [-v <level>] [-t <sec>] [-x <mode>] [-c <nConf>] [-C] [-O <mode>] [-K <N>] [-p] [-S]\n");
     Abc_Print(-2, "\t-k <int>    : timeframe expansion depth (t=0..k), k=0 means single frame\n");
     Abc_Print(-2, "\t-I <string> : initial value for latches (0,1,x); default all 0; length = nRegs\n");
     Abc_Print(-2, "\t-r [<seed>] : derive target reset by random simulation (optional seed)\n");
     Abc_Print(-2, "\t-R <num>    : number of random simulation frames (default=k if -r given, 0=no sim)\n");
     Abc_Print(-2, "\t-D <pct>    : set <pct>%% (1-99) of target registers to don't care (requires -r)\n");
+    Abc_Print(-2, "\t-l <N>      : prune redundant resets over N iterations (requires -r and -L)\n");
+    Abc_Print(-2, "\t-L <T>      : cycles per pruning simulation (requires -r and -l)\n");
     Abc_Print(-2, "\t-o <file>   : dump structured report to file\n");
     Abc_Print(-2, "\t-v <level>  : verbose level (0=none, 1=summary, 2=debug)\n");
     Abc_Print(-2, "\t-t <sec>    : thread CPU time budget in seconds (used with -O or single -k mode)\n");

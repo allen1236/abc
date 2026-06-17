@@ -53,6 +53,10 @@ struct Minr_Man_t_
     int         nOptimizeMode;  // -O <mode>: 0=off, 1=sweep k, 2=outer-loop heuristic
     double      totalTimeout;   // Total time budget in seconds (-t)
     int         nDontCarePercent; // -D <1..99>: % of target registers set to don't care
+    int         nPruneIters;    // -l <N>: redundant-reset pruning iterations (-1 = disabled)
+    int         nPruneCycles;   // -L <T>: cycles per pruning simulation
+    char *      pInitStrPrePrune; // target before -l/-L pruning (for report)
+    int         nPruneNecessary;  // specified registers kept after pruning
     int         nOptimizeDenseKMax; // -K N with -O 1: dense sweep inclusive end; -1 = geometric schedule
     int         nOptimizeDenseKMin; // with -K: dense sweep start from -k (CLI default 0 if -k omitted)
     int         fDebugNoPropCut;   // -p: use external EvalMaxSAT binary instead of IPAMIR (.so)
@@ -139,7 +143,7 @@ struct Minr_Man_t_
 
 extern void Minr_ExtractCut( Minr_Man_t * p );
 extern void Minr_ExtractEqCut( Minr_Man_t * p );
-extern void Minr_Solve( Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin, int fDebugNoPropCut, int fSpecRegConstraintAtK );
+extern void Minr_Solve( Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin, int fDebugNoPropCut, int fSpecRegConstraintAtK, int nPruneIters, int nPruneCycles );
 
 /** 1 iff -S is on and target has at least one specified (0/1) register; else solver falls back to cut at t=k. */
 static inline int Minr_ManUsesSpecRegAtLastTf( Minr_Man_t const * p )

@@ -250,6 +250,211 @@ static char * Minr_DeriveTargetResetByRandomSim( Gia_Man_t * pGia, char * pRoIni
     return pTarget;
 }
 
+// Run T-cycle binary simulation with fixed initial state and PI pattern.
+// vInitState: nRegs entries {0,1}
+// vPiPerFrame: nFrames * nPI entries (frame t at t*nPI + pi)
+// vPoOut: written with nFrames * nPO entries (frame t at t*nPO + po)
+static void Minr_RunPoSim( Gia_Man_t * pGia, Vec_Int_t * vInitState, Vec_Int_t * vPiPerFrame, int nFrames, Vec_Int_t * vPoOut )
+{
+    int nRegs = Gia_ManRegNum( pGia );
+    int nPI   = Gia_ManPiNum( pGia );
+    int nPO   = Gia_ManPoNum( pGia );
+    Vec_Int_t * vObjVals = Vec_IntStart( Gia_ManObjNum( pGia ) );
+    Vec_Int_t * vCurrentState = Vec_IntAlloc( nRegs );
+    Gia_Obj_t * pObj;
+    int iObj, t, i, piIdx, poIdx;
+
+    for ( i = 0; i < nRegs; i++ )
+        Vec_IntPush( vCurrentState, Vec_IntEntry( vInitState, i ) );
+
+    Vec_IntFill( vPoOut, nFrames * nPO, 0 );
+
+    for ( t = 0; t < nFrames; t++ )
+    {
+        piIdx = 0;
+        Gia_ManForEachPi( pGia, pObj, iObj )
+            Vec_IntWriteEntry( vObjVals, Gia_ObjId( pGia, pObj ), Vec_IntEntry( vPiPerFrame, t * nPI + piIdx++ ) );
+
+        for ( i = 0; i < nRegs; i++ )
+        {
+            Gia_Obj_t * pRo = Gia_ManRo( pGia, i );
+            Vec_IntWriteEntry( vObjVals, Gia_ObjId( pGia, pRo ), Vec_IntEntry( vCurrentState, i ) );
+        }
+
+        Minr_SimulateTimeframe( pGia, vObjVals );
+
+        poIdx = 0;
+        Gia_ManForEachPo( pGia, pObj, iObj )
+            Vec_IntWriteEntry( vPoOut, t * nPO + poIdx++, Vec_IntEntry( vObjVals, Gia_ObjId( pGia, pObj ) ) );
+
+        Vec_IntClear( vCurrentState );
+        for ( i = 0; i < nRegs; i++ )
+        {
+            Gia_Obj_t * pRi = Gia_ManRi( pGia, i );
+            Vec_IntPush( vCurrentState, Vec_IntEntry( vObjVals, Gia_ObjId( pGia, pRi ) ) );
+        }
+    }
+
+    Vec_IntFree( vObjVals );
+    Vec_IntFree( vCurrentState );
+}
+
+// Compare two PO sequences; return 1 if equal.
+static int Minr_PoSeqEqual( Vec_Int_t * vA, Vec_Int_t * vB, int nLen )
+{
+    int i;
+    for ( i = 0; i < nLen; i++ )
+        if ( Vec_IntEntry( vA, i ) != Vec_IntEntry( vB, i ) )
+            return 0;
+    return 1;
+}
+
+// Prune redundant specified registers from pInitStr via PO golden comparison.
+// RNG stream must already be seeded/advanced by caller (-r/-D).
+static void Minr_PruneRedundantResets( Gia_Man_t * pGia, char * pInitStr, int nIters, int nCycles, int vLevel, int * pnNecessary )
+{
+    int nRegs = Gia_ManRegNum( pGia );
+    int nPI   = Gia_ManPiNum( pGia );
+    int nPO   = Gia_ManPoNum( pGia );
+    int nSpecBefore = 0, nSpecAfter = 0;
+    unsigned char * vNecessary = NULL;
+    int * vFreeInit = NULL;
+    Vec_Int_t * vResolvedInit = NULL;
+    Vec_Int_t * vPiPerFrame = NULL;
+    Vec_Int_t * vGoldenPo = NULL;
+    Vec_Int_t * vTrialPo = NULL;
+    int iter, ri, t, piIdx;
+
+    if ( pnNecessary )
+        *pnNecessary = 0;
+
+    for ( ri = 0; ri < nRegs; ri++ )
+        if ( pInitStr[ri] == '0' || pInitStr[ri] == '1' )
+            nSpecBefore++;
+
+    if ( nPO == 0 )
+    {
+        Abc_Print( 1, "[Prune] Warning: circuit has no POs; skipping redundant-reset pruning.\n" );
+        if ( pnNecessary )
+            *pnNecessary = nSpecBefore;
+        return;
+    }
+
+    if ( nSpecBefore == 0 )
+    {
+        if ( vLevel > 0 )
+            Abc_Print( 1, "[Prune] No specified registers; nothing to prune.\n" );
+        return;
+    }
+
+    vNecessary    = (unsigned char *)calloc( (size_t)nRegs, 1 );
+    vFreeInit     = ABC_ALLOC( int, nRegs );
+    vResolvedInit = Vec_IntAlloc( nRegs );
+    vPiPerFrame   = Vec_IntAlloc( nCycles * nPI );
+    vGoldenPo     = Vec_IntAlloc( nCycles * nPO );
+    vTrialPo      = Vec_IntAlloc( nCycles * nPO );
+    if ( !vNecessary || !vFreeInit || !vResolvedInit || !vPiPerFrame || !vGoldenPo || !vTrialPo )
+        goto cleanup;
+
+    for ( iter = 0; iter < nIters; iter++ )
+    {
+        int nPending = 0;
+
+        for ( ri = 0; ri < nRegs; ri++ )
+        {
+            if ( pInitStr[ri] == 'x' )
+                vFreeInit[ri] = Minr_RandomBinary();
+            if ( (pInitStr[ri] == '0' || pInitStr[ri] == '1') && !vNecessary[ri] )
+                nPending++;
+        }
+
+        if ( nPending == 0 )
+        {
+            if ( vLevel >= 2 )
+                Abc_Print( 1, "[Prune] iter %d: all specified registers already necessary; skip.\n", iter );
+            break;
+        }
+
+        Vec_IntClear( vPiPerFrame );
+        for ( t = 0; t < nCycles; t++ )
+            for ( piIdx = 0; piIdx < nPI; piIdx++ )
+                Vec_IntPush( vPiPerFrame, Minr_RandomBinary() );
+
+        Vec_IntClear( vResolvedInit );
+        for ( ri = 0; ri < nRegs; ri++ )
+        {
+            char c = pInitStr[ri];
+            int Val;
+            if ( c == '1' )
+                Val = MINR_VAL_1;
+            else if ( c == '0' )
+                Val = MINR_VAL_0;
+            else
+                Val = vFreeInit[ri];
+            Vec_IntPush( vResolvedInit, Val );
+        }
+
+        Minr_RunPoSim( pGia, vResolvedInit, vPiPerFrame, nCycles, vGoldenPo );
+
+        for ( ri = 0; ri < nRegs; ri++ )
+        {
+            int ValOrig, ValFlip;
+
+            if ( pInitStr[ri] != '0' && pInitStr[ri] != '1' )
+                continue;
+            if ( vNecessary[ri] )
+                continue;
+
+            ValOrig = Vec_IntEntry( vResolvedInit, ri );
+            ValFlip = Minr_Not( ValOrig );
+            Vec_IntWriteEntry( vResolvedInit, ri, ValFlip );
+
+            Minr_RunPoSim( pGia, vResolvedInit, vPiPerFrame, nCycles, vTrialPo );
+
+            Vec_IntWriteEntry( vResolvedInit, ri, ValOrig );
+
+            if ( !Minr_PoSeqEqual( vGoldenPo, vTrialPo, nCycles * nPO ) )
+            {
+                vNecessary[ri] = 1;
+                if ( vLevel >= 2 )
+                    Abc_Print( 1, "[Prune] iter %d: L[%d] necessary (PO mismatch).\n", iter, ri );
+            }
+        }
+
+        if ( vLevel >= 2 )
+        {
+            int nSoFar = 0;
+            for ( ri = 0; ri < nRegs; ri++ )
+                if ( vNecessary[ri] )
+                    nSoFar++;
+            Abc_Print( 1, "[Prune] iter %d done: %d necessary so far.\n", iter, nSoFar );
+        }
+    }
+
+    for ( ri = 0; ri < nRegs; ri++ )
+    {
+        if ( (pInitStr[ri] == '0' || pInitStr[ri] == '1') && !vNecessary[ri] )
+            pInitStr[ri] = 'x';
+        if ( pInitStr[ri] == '0' || pInitStr[ri] == '1' )
+            nSpecAfter++;
+    }
+
+    if ( pnNecessary )
+        *pnNecessary = nSpecAfter;
+
+    if ( vLevel > 0 )
+        Abc_Print( 1, "[Prune] Redundant-reset pruning: %d -> %d specified registers (%d iterations, %d cycles).\n",
+                   nSpecBefore, nSpecAfter, nIters, nCycles );
+
+cleanup:
+    ABC_FREE( vFreeInit );
+    ABC_FREE( vNecessary );
+    if ( vResolvedInit ) Vec_IntFree( vResolvedInit );
+    if ( vPiPerFrame )   Vec_IntFree( vPiPerFrame );
+    if ( vGoldenPo )     Vec_IntFree( vGoldenPo );
+    if ( vTrialPo )      Vec_IntFree( vTrialPo );
+}
+
 ////////////////////////////////////////////////////////////////////////
 ///                     CORE SIMULATION KERNEL                       ///
 ////////////////////////////////////////////////////////////////////////
@@ -1561,6 +1766,12 @@ static void Minr_DumpReport(Minr_Man_t * p)
     }
     if (p->nDontCarePercent > 0)
         fprintf(pFile, "dontcare_pct   = %d\n",  p->nDontCarePercent);
+    if (p->nPruneIters >= 0) {
+        fprintf(pFile, "prune_iters    = %d\n",  p->nPruneIters);
+        fprintf(pFile, "prune_cycles   = %d\n",  p->nPruneCycles);
+        fprintf(pFile, "target_pre_prune = %s\n", p->pInitStrPrePrune ? p->pInitStrPrePrune : p->pInitStr);
+        fprintf(pFile, "prune_necessary = %d\n", p->nPruneNecessary);
+    }
     fprintf(pFile, "refine_mode    = %d\n",  p->nRefineMode);
     fprintf(pFile, "last_tf_constr = %s\n",  Minr_ManUsesSpecRegAtLastTf(p) ? "specified_ro" : "cut");
     fprintf(pFile, "\n");
@@ -2878,7 +3089,7 @@ void Minr_SolveOptimize2(Minr_Man_t * p)
 #if !defined(ABC_NAMESPACE)
 extern "C"
 #endif
-void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin, int fDebugNoPropCut, int fSpecRegConstraintAtK) {
+void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitInit, int fRandTarget, int nRandomSim, int vLevel, int seed, int nRefineMode, int fRefineBindDc, int nRefineConfLimit, int fRefineCoreOnly, char * pReportFile, int nOptimizeMode, double totalTimeout, int nDontCarePercent, int nOptimizeDenseKMax, int nOptimizeDenseKMin, int fDebugNoPropCut, int fSpecRegConstraintAtK, int nPruneIters, int nPruneCycles) {
     Minr_Man_t Man;
     Minr_Man_t * p = &Man;
     memset(p, 0, sizeof(Minr_Man_t));
@@ -2906,6 +3117,8 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     p->nOptimizeDenseKMin = nOptimizeDenseKMin;
     p->fDebugNoPropCut = fDebugNoPropCut;
     p->fSpecRegConstraintAtK = fSpecRegConstraintAtK;
+    p->nPruneIters = nPruneIters;
+    p->nPruneCycles = nPruneCycles;
 
     // Optional: derive target reset value by random multi-frame simulation (-r)
     // If user didn't explicitly provide -I, pass NULL so random sim starts from random state.
@@ -2945,6 +3158,13 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
                 printf( "[DontCare] Set %d/%d registers (%.0f%%) to don't care.\n",
                         nDC, nRegs, 100.0 * nDC / nRegs );
         }
+    }
+
+    // Redundant-reset pruning (-l/-L): after -r/-D, before solving
+    if ( p->nPruneIters >= 0 )
+    {
+        p->pInitStrPrePrune = Abc_UtilStrsav( p->pInitStr );
+        Minr_PruneRedundantResets( pGia, p->pInitStr, p->nPruneIters, p->nPruneCycles, p->vLevel, &p->nPruneNecessary );
     }
 
     p->timeSolveStart = Minr_CpuTicks();
@@ -3029,6 +3249,7 @@ void Minr_Solve(Gia_Man_t * pGia, int nFrames, char * pInitStr, int fExplicitIni
     if (p->vOpt2OuterInnerResets) Vec_WecFree(p->vOpt2OuterInnerResets);
     if (p->vOpt2OuterInnerTimeMs) Vec_WecFree(p->vOpt2OuterInnerTimeMs);
     if (pTargetInitStr) free(pTargetInitStr);
+    if (p->pInitStrPrePrune) free(p->pInitStrPrePrune);
 }
 
 ABC_NAMESPACE_IMPL_END
