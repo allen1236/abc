@@ -1,0 +1,1874 @@
+Reset Minimization in Sequential Circuits via Bounded
+Initialization Sequences
+Anonymous Author(s)
+
+Abstract
+Resets in sequential circuits incur significant area and routing over-
+head. Existing reset-removal methods rely on observability don’t-
+cares (ODCs) but do not synthesize initialization sequences, while
+initialization techniques typically target arbitrary known values
+rather than user-specified ones. We propose a scalable framework
+for reset minimization that realizes user-specified initial conditions
+up to functional equivalence. The target is expressed as a partial
+register assignment, reflecting practical scenarios and expanding
+the optimization space. Our method combines timeframe expansion
+with Maximum Satisfiability (MaxSAT) to derive reset specifications
+and initialization sequences under a three-valued approximation,
+followed by exact SAT-based refinement to reduce pessimism. Ex-
+periments on ISCAS’89 and ITC’99 benchmarks show that, under
+a 10-minute runtime budget per design for the iterative MaxSAT
+stage, the proposed approach eliminates 43.75% of required resets
+on aggregate.
+
+ACM Reference Format:
+Anonymous Author(s). 2026. Reset Minimization in Sequential Circuits via
+Bounded Initialization Sequences . In . ACM, New York, NY, USA, 9 pages.
+https://doi.org/10.1145/nnnnnnn.nnnnnnn
+
+1 Introduction
+Initializing a sequential design into a desired operating condition is
+a fundamental requirement at startup, after power-up, and during
+recovery from exceptional events. In this work, we use reset to
+refer to a dedicated reset mechanism that directly forces registers
+to prescribed values when a reset signal is asserted, rather than
+scan-based or sequence-based initialization. Although such reset
+provides a convenient and predictable way to establish an initial
+condition, it is not free: resettable registers typically require larger
+cells, additional routing resources, and may exacerbate congestion,
+power, and timing issues [6, 19]. As modern designs continue to
+scale in size and complexity, reducing unnecessary reset while
+preserving correct initialization becomes an increasingly important
+optimization objective.
+
+A line of prior work addresses reset reduction through redundant-
+reset detection and related analyses of initialization necessity. In
+particular, sequential-analysis-based methods identify resets whose
+values cannot affect the observable behavior and can therefore
+be safely removed [19]. Related work has also shown that, under
+
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+and/or a fee. Request permissions from permissions@acm.org.
+Conference’17, Washington, DC, USA
+© 2026 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+ACM ISBN 978-x-xxxx-xxxx-x/YYYY/MM
+https://doi.org/10.1145/nnnnnnn.nnnnnnn
+
+bounded startup behavior, some registers need not be initialized,
+enabling reductions in initialized registers and associated routing
+overhead [6]. Such techniques are highly relevant from the stand-
+point of area, power, and routability. However, they do not exploit
+initialization sequences to realize a user-required startup condition.
+A different line of work studies circuit initialization through
+primary-input sequences [13, 15, 17, 18]. These works aim either to
+initialize as many registers as possible or to initialize all registers
+with the minimum number of resettable registers. However, they
+focus on driving registers into arbitrary known values rather than
+satisfying an explicitly specified startup requirement.
+
+To bridge this gap, we study reset minimization with initializa-
+tion sequences under an explicit user-specified startup requirement.
+We represent this requirement as a reset vector, i.e., an assignment
+over all registers in which each entry is 0, 1, or unspecified. Impor-
+tantly, the reset vector is not treated as a literal bitwise state that
+must be matched exactly; rather, it specifies the startup behavior to
+be realized. This reflects the practical observation that only part of
+the register state may matter at startup, and requiring all registers
+to be initialized can introduce unnecessary reset with no actual
+benefit [6].
+
+Under this formulation, the initialization sequence is used to
+compensate for removed reset while still realizing the initial reset
+vector. Our objective is therefore not merely to drive registers into
+arbitrary known values, as in prior circuit initialization works,
+but to realize the required startup behavior with as little reset as
+possible. This leads to a different correctness notion: safe realization
+of the initial reset vector.
+
+At a broader level, related notions also appear in automata theory
+and test generation, such as synchronizing sequences [10, 16], hom-
+ing sequences [12, 14], and ATPG-style state-steering formulations
+[5, 9]. These approaches are conceptually adjacent to our problem
+in that they also use primary-input sequences to reduce uncertainty
+in sequential behavior, either by steering the system toward certain
+states or by resolving ambiguity relevant to testing. However, their
+objectives are different: synchronizing- and homing-sequence for-
+mulations are typically concerned with the existence or length of
+such sequences, whereas ATPG-style formulations focus on testing
+goals such as fault activation, propagation, or coverage.
+
+To solve the proposed formulation, we begin from the initial reset
+vector, and derive a more tractable sufficient condition for safe re-
+alization. This condition enables an optimization framework based
+on timeframe expansion. We then encode the resulting problem
+using three-valued logic and formulate a MaxSAT instance whose
+solution simultaneously determines a final reset vector and an
+initialization sequence. Because the 3-valued abstraction is conser-
+vative, we further incorporate an exact SAT-based refinement step
+to recover solutions that may be excluded by the overapproxima-
+tion. In this way, the proposed optimization flow remains scalable
+while preserving correctness under the original formulation.
+
+Conference’17, July 2017, Washington, DC, USA
+
+Anon.
+
+The main contributions of this work are summarized as follows:
+
+• We formulate a new initialization problem that combines
+reset minimization with initialization sequences under an
+explicitly specified startup requirement.
+
+• We introduce safe realization for initial reset vectors with
+unspecified entries, thereby distinguishing our formulation
+from prior circuit-initialization methods that target arbitrary
+known values.
+
+• We derive a scalable optimization framework based on a
+sufficient structural condition, timeframe expansion, and
+MaxSAT encoding.
+
+• We incorporate an exact SAT-based refinement procedure to
+mitigate the conservatism of the stronger surrogate condi-
+tion.
+
+• Experimental results on the ISCAS’89 and ITC’99 bench-
+marks demonstrate that the proposed method can substan-
+tially reduce reset while preserving the required startup
+behavior.
+
+2 Preliminaries
+2.1 Boolean Network
+A combinational Boolean netlist can be modeled as a directed acyclic
+graph (DAG) where nodes represent logic gates and edges repre-
+sent interconnections. The source and sink nodes are primary in-
+puts (PIs) and primary outputs (POs), respectively. For a sequential
+netlist, the presence of state-holding elements (flip-flops) introduces
+cyclic dependencies. To analyze the sequential behavior combina-
+tionally, we model the circuit by breaking the feedback loops at the
+registers. We decompose each register into a present-state node
+𝑟 ∈ 𝑅 (acting as a pseudo-PI) and a next-state node 𝑟 ′ ∈ 𝑅′ (acting
+as a pseudo-PO). Consequently, the sequential circuit is abstracted
+as a purely combinational DAG 𝐺 = (𝑉 , 𝐸), where the node set
+consists of PIs, POs, 𝑅, 𝑅′, and logic gates. In this work, the union
+of PIs and 𝑅 is referred to as combinational inputs (CIs), and the
+union of POs and 𝑅′ is referred to as combinational outputs (COs)
+While our proposed methodology is applicable to general gate-
+level netlists, we formulate and implement our approach using the
+and-inverter graph (AIG) for structural and computational efficiency.
+An AIG restricts the internal logic nodes to exclusively two-input
+AND gates. Inversions are not physical nodes but are represented
+as boolean attributes on the directed edges 𝐸.
+
+2.2 3-Valued Logic and AIG Evaluation
+To analyze the logic evaluation unknown starting states and pri-
+mary inputs, we employ 3-valued logic with T = {0, 1, 𝑋 }, where 𝑋
+denotes an unknown or undetermined value. In the sequel, we use
+the hat symbol “ˆ” to denote any bit vector, operator, or function
+in the 3-valued domain T.
+
+Any standard Boolean function 𝑓 : B𝑛 → B can be lifted to its
+ternary extension ˆ𝑓 : T𝑛 → T. In our structural AIG representation,
+the ternary evaluation is performed node-by-node according to
+Kleene’s semantics:
+
+• Inverter: ˆ¬(0) = 1, ˆ¬(1) = 0, and ˆ¬(𝑋 ) = 𝑋 .
+
+• AND gate: For 𝑐 = ˆ∧(𝑎, 𝑏), the output 𝑐 = 0 if at least one
+input is 0 (the controlling value). The output 𝑐 = 1 if and
+only if both inputs are 1. In all other cases, 𝑐 = 𝑋 .
+
+While 3-valued logic enables efficient linear-time evaluation of a
+network with unknown input or register assignment, it inherently
+suffers from X-pessimism due to the loss of spatial correlation be-
+tween internal signals. Consequently, any signal that evaluates to
+a 0 or 1 in the ternary domain is guaranteed to hold that constant
+value in the Boolean domain (a safe over-approximation). However,
+a signal evaluated to 𝑋 could still be a Boolean constant in exact
+logical analysis.
+
+2.3 Satisfiability and Maximum Satisfiability
+Given a Boolean formula in conjunctive normal form (CNF), the
+satisfiability (SAT) problem [7] asks whether there exists an assign-
+ment to its variables that satisfies all clauses. SAT is widely used
+in logic synthesis, verification, and test generation as a general
+framework for exact Boolean reasoning.
+
+The maximum satisfiability (MaxSAT) problem [1] extends SAT
+by optimizing the number of satisfied clauses. In particular, a MaxSAT
+instance consists of two sets of clauses: a set of hard clauses, all of
+which must be satisfied, and a set of soft clauses, of which as many
+as possible should be satisfied simultaneously. Therefore, MaxSAT
+provides a natural way to express combinational or sequential
+constraints exactly through the hard clauses, while encoding an
+optimization objective through the soft clauses.
+
+3 Problem Formulation
+We now formalize the initialization problem introduced in Section 1.
+Our goal is to realize an explicitly specified startup requirement
+using as little reset as possible, assisted by an initialization sequence
+on PIs.
+
+To formalize this idea, we model a sequential circuit as a four-
+tuple N = ⟨𝐼, 𝑂, 𝑅, 𝐹 ⟩, where 𝐼 , 𝑂, and 𝑅 are the sets of primary
+inputs, primary outputs, and state variables (registers), respectively.
+The behavior of the network, including both the primary outputs
+and the next-state values, is represented by the Boolean function
+of COs in terms of CIs
+
+𝐹 : B|𝐼 | × B|𝑅 | → B|𝑂 | × B|𝑅 |,
+where B = {0, 1}. In this work, a state refers to a full binary assign-
+ment on all registers, i.e., an element of B|𝑅 | .
+
+(1)
+
+The startup requirement is given by an initial reset vector
+ˆ𝜎 ∈ {0, 1, 𝑋 } |𝑅 |,
+where entries 0 and 1 specify reset values, and 𝑋 denotes an unspec-
+ified value. Registers assigned 0 or 1 are called reset registers, while
+registers assigned 𝑋 are called free registers. A state 𝜎 ∗ ∈ B|𝑅 | is
+compatible with ˆ𝜎 if, for every register 𝑟 ∈ 𝑅 such that ˆ𝜎 (𝑟 ) ∈ {0, 1},
+we have
+
+𝜎 ∗ (𝑟 ) = ˆ𝜎 (𝑟 ).
+
+We denote by [ ˆ𝜎] the set of all states compatible with ˆ𝜎.
+
+Definition 1 (Safe Realization of the Reset Vector). Given a se-
+quential circuit N = ⟨𝐼, 𝑂, 𝑅, 𝐹 ⟩, and an initial reset vector ˆ𝜎,
+
+Let 𝑆 ⊆ B|𝑅 | be the set of reachable states after resetting some
+
+registers and applying a certain initialization sequence.
+
+Reset Minimization in Sequential Circuits via Bounded Initialization Sequences
+
+Conference’17, July 2017, Washington, DC, USA
+
+Figure 2: The overall flow of the proposed method.
+
+Figure 1: Miter view of safe realization.
+
+We say that 𝑆 safely realizes ˆ𝜎 under 𝐹 , denoted by 𝑆 ⪯𝐹 ˆ𝜎, if and
+only if for every state 𝜎 ∈ 𝑆, there exists at least one state 𝜎 ∗ ∈ [ ˆ𝜎]
+such that the evaluation of 𝐹 at states 𝜎 and 𝜎 ∗ are identical for all
+PI assignments. Formally,
+
+∀𝜎 ∈ 𝑆, ∃𝜎 ∗ ∈ [ ˆ𝜎], ∀𝜋 ∈ B|𝐼 |,
+
+𝐹 (𝜋, 𝜎) = 𝐹 (𝜋, 𝜎 ∗).
+
+(2)
+
+The concept of safe realization is illustrated by the miter in
+Fig. 1. The unrolled circuit is reset by the final reset vector ˆ𝜌 and
+the reference circuit is reset by the initial reset vector ˆ𝜎. After
+applying the initialization sequence on the unrolled circuit, in the
+comparison timeframe, both copies share the same PI assignment,
+and all COs are required to be equal. Since the COs include both POs
+and next-state values, this enforces equivalence of both immediate
+observable behavior and subsequent state transitions.
+
+This formulation can be intuitively understood as a functional re-
+laxation of traditional bitwise reset matching. Consider a simplified
+case where the initial reset vector ˆ𝜎 is fully specified (i.e., it con-
+tains no free registers). In this scenario, the compatible-state set [ ˆ𝜎]
+contains only a single unique state 𝜎 ∗, and the existential quantifier
+in Eq. (2) disappears. The problem then simplifies to a straightfor-
+ward universal quantification that requires every reached state to
+functionally meet 𝜎 ∗.
+
+The free registers in ˆ𝜎 introduce an existential quantification, en-
+larging the optimization space but also making verification harder.
+While the fully specified case yields a ∀∀ condition, the general case
+becomes a ∀∃∀ QBF, which falls into Π𝑃
+3 complexity class of the
+Polynomial Hierarchy. This motivates our structural approximation
+developed in Section 4.1.
+
+Problem Statement (Hardware-Reset Minimization under Safe
+Realization). Given:
+
+• a sequential circuit N = ⟨𝐼, 𝑂, 𝑅, 𝐹 ⟩ and
+• an initial reset vector ˆ𝜎 ∈ {0, 1, 𝑋 } |𝑅 | ,
+
+find:
+
+• a final reset vector ˆ𝜌 ∈ {0, 1, 𝑋 } |𝑅 | and
+• a 𝑘-cycle PI sequence Π = ⟨𝜋 0, . . . , 𝜋𝑘 −1⟩, for 𝜋𝑡 ∈ B|𝐼 | ,
+such that 𝑆𝑘 ⪯𝐹 ˆ𝜎, for 𝑆𝑘 being the reachable states at timeframe
+𝑡 = 𝑘 by applying Π from all possible state compatible with ˆ𝜌, while
+the number of resets, i.e., the number of 0 and 1 in ˆ𝜌 is minimized.
+
+Figure 3: Illustration of the target-induced constant cut 𝑉𝐶
+that separates the reset registers from the COs.
+
+4 Proposed Method
+The overall flow is shown in Fig. 2. First, we derive a target-induced
+constant cut as a sufficient condition for safe realization (Section 4.1).
+Second, we unroll the circuit over a given timeframe length and
+solve a MaxSAT formulation to obtain a final reset vector and
+initialization sequence (Section 4.2). We repeat this process with
+different timeframe lengths to search for a best baseline solution
+(Section 4.3). Finally, we apply an exact SAT-based refinement to
+recover Boolean relations missed by the 3-valued approximation
+(Section 4.4).
+
+4.1 Target-Induced Constant Cut
+As discussed in Section 3, directly verifying safe realization re-
+quires a ∀∃∀ condition. To avoid solving this quantified condition
+directly, we derive a stronger structural condition that removes the
+existential quantifier on the initial reset vector.
+
+Given the initial reset vector ˆ𝜎, let
+
+𝑅reset = {𝑟 ∈ 𝑅 | ˆ𝜎 (𝑟 ) ∈ {0, 1}},
+
+𝑅free = {𝑟 ∈ 𝑅 | ˆ𝜎 (𝑟 ) = 𝑋 }.
+
+We compute a structural cut 𝑉𝐶 ⊆ 𝑉 on the combinational DAG
+𝐺 N = (𝑉 , 𝐸) such that every path from 𝑅reset to any CO intersects
+𝑉𝐶 , as illustrated in Fig. 3. Let
+
+𝐹𝐶 : B|𝐼 | × B|𝑅 | → B|𝑉𝐶 |
+denote the Boolean valuation of the cut signals. Since 𝑉𝐶 blocks the
+structural influence of the reset registers, the CO behavior can be
+decomposed as
+
+𝐹 (𝜋, 𝜎) = 𝐹𝐷 (cid:0)𝜋, 𝜎 |𝑅free
+
+, 𝐹𝐶 (𝜋, 𝜎)(cid:1) ,
+
+(3)
+
+where 𝐹𝐷 denotes the downstream logic from the PIs, the free
+registers, and the cut signals to the COs.
+
+The key idea is to choose 𝑉𝐶 so that its value is fixed for all states
+
+compatible with the initial reset vector:
+
+∀𝜎 ∗ ∈ [ ˆ𝜎], ∀𝜋 ∈ B|𝐼 |,
+
+𝐹𝐶 (𝜋, 𝜎 ∗) = 𝛼,
+
+(4)
+
+for some 𝛼 ∈ B|𝑉𝐶 | .
+
+PIPOPIPOPIPOReferencePOTimeframe 0PITimeframe 1Timeframe kInitialization SequenceEQ?Target-Induced Constant Cut ComputationMaxSAT Solvingk-timeframe MaxSAT EncodingSAT-based RefinementNoYesTimeout ?Near Optimal?Zero Reset?Sequential Network and Initial Reset VectorIncrease kAIG Transformation and Optimization Final Reset Vector and Initialization SequenceMiter ConstructionPOPIConference’17, July 2017, Washington, DC, USA
+
+Anon.
+
+We then enforce the same cut value on every reached state:
+
+∀𝜎 ∈ 𝑆𝑘, ∀𝜋 ∈ B|𝐼 |,
+
+𝐹𝐶 (𝜋, 𝜎) = 𝛼 .
+
+(5)
+
+The following theorem shows that this reference-free cut condition
+is sufficient for safe realization.
+
+Theorem 1 (Safe Realization via Constant Cut).
+If 𝑉𝐶 satisfies
+Eq. (4) and the reached state set 𝑆𝑘 satisfies Eq. (5), then 𝑆𝑘 safely
+realizes the initial reset vector ˆ𝜎, i.e.,
+
+𝑆𝑘 ⪯𝐹 ˆ𝜎.
+
+Proof. Consider any reached state 𝜎 ∈ 𝑆𝑘 . Construct a compat-
+ible state 𝜎 ∗ ∈ [ ˆ𝜎] by assigning the reset registers according to ˆ𝜎
+and copying the free-register values from 𝜎:
+
+𝜎 ∗|𝑅reset = ˆ𝜎 |𝑅reset,
+
+𝜎 ∗|𝑅free = 𝜎 |𝑅free
+
+.
+
+By Eq. (4) and Eq. (5), both 𝜎 ∗ and 𝜎 induce the same cut value 𝛼
+under every PI assignment. Using the decomposition in Eq. (3), for
+every 𝜋 ∈ B|𝐼 | we have
+
+𝐹 (𝜋, 𝜎 ∗) = 𝐹𝐷 (cid:0)𝜋, 𝜎 ∗|𝑅free
+
+, 𝛼 (cid:1) = 𝐹𝐷 (cid:0)𝜋, 𝜎 |𝑅free
+
+, 𝛼 (cid:1) = 𝐹 (𝜋, 𝜎).
+
+Thus, for every reached state 𝜎 ∈ 𝑆𝑘 , there exists a compatible state
+𝜎 ∗ ∈ [ ˆ𝜎] with identical CO behavior under all PI assignments. By
+Eq. (2), 𝑆𝑘 ⪯𝐹 ˆ𝜎.
+□
+
+Theorem 1 explains why the original existential witness need not
+be searched for. Under the constant-cut condition, a valid witness
+can always be constructed as in the proof. Therefore, instead of
+solving the original ∀∃∀ condition on the miter in Fig. 1, it is suffi-
+cient to enforce the cut condition (Eq. (5)) on the unrolled circuit
+itself, which contains only universal quantification.
+
+It remains to derive a cut satisfying Eq. (4). We do so conserva-
+tively using 3-valued simulation. Registers are assigned according
+to the initial reset vector ˆ𝜎, and all PIs are assigned the all-𝑋 vector
+ˆ𝜋𝑋 . The circuit is then evaluated under the 3-valued AIG semantics
+in Section 2.2. By soundness of 3-valued evaluation, any node eval-
+uated to 0 or 1 has that specific Boolean value for all compatible
+states of ˆ𝜎 and all PI assignments.
+
+We then perform a backward traversal from every CO. When
+the traversal reaches a node whose simulated value is deterministic,
+i.e., in {0, 1}, we include that node in 𝑉𝐶 and stop traversing that
+branch. When the simulated value is 𝑋 , we continue to its fanins.
+This procedure selects the first constant cut seen from the CO side,
+i.e., the most downstream constant cut. Choosing such a cut makes
+the sufficient condition less restrictive. The resulting frontier forms
+the target-induced constant cut. The corresponding constant vector
+is
+
+𝛼 = ˆ𝐹𝐶 ( ˆ𝜋𝑋 , ˆ𝜎),
+which is Boolean because every node in 𝑉𝐶 has a deterministic
+3-valued value.
+
+This cut is conservative: some signals that are Boolean constants
+under exact reasoning may still evaluate to 𝑋 in 3-valued logic.
+We intentionally derive the cut in the 3-valued domain because
+the subsequent MaxSAT encoding also enforces the cut condition
+through 3-valued evaluation.
+
+Consequently, the original ∀∃∀ miter condition is replaced by
+
+the sufficient cut condition in Eq. (5).
+
+4.2 𝑘-timeframe MaxSAT Encoding
+After Section 4.1, safe realization is reduced to the constant-cut
+condition in Eq. (5). For a fixed initialization length 𝑘, this condition
+still universally quantifies over all compatible states of the final
+reset vector ˆ𝜌 at timeframe 0 and over all PI assignments at the com-
+parison timeframe. We discharge these quantifiers conservatively
+by unrolling the circuit in 3-valued logic.
+
+Starting from ˆ𝜎 0 = ˆ𝜌, the 𝑘-timeframe expansion propagates all
+compatible states of ˆ𝜌 with the initialization sequence and produces
+a final 3-valued state ˆ𝜎𝑘 . Instead of enumerating all reached Boolean
+states and comparison PI assignments, we enforce the cut condition
+once:
+
+ˆ𝐹𝐶 ( ˆ𝜋𝑋 , ˆ𝜎𝑘 ) = 𝛼,
+(6)
+where ˆ𝜋𝑋 is the all-𝑋 PI vector at the comparison timeframe. By
+soundness of 3-valued evaluation, Eq. (6) is sufficient for Eq. (5).
+Thus, for a fixed 𝑘, the remaining task becomes an existential search
+over the final reset vector, the initialization sequence, and the aux-
+iliary variables of the 3-valued encoding, which can be encoded as
+a MaxSAT instance.
+
+Let ˆ𝜎𝑡 ∈ T|𝑅 | denote the 3-valued register state at timeframe 𝑡,
+and let ˆ𝜋𝑡 ∈ T|𝐼 | denote the PI vector at timeframe 𝑡. The vectors ˆ𝜋𝑡
+are represented in the 3-valued domain for uniformity of the encod-
+ing, but they are constrained to be binary because the initialization
+sequence is a concrete PI sequence. Let
+
+ˆ𝐹reg : T|𝐼 | × T|𝑅 | → T|𝑅 |
+denote the register input function of the 3-valued extension of 𝐹 .
+The transition relation over 𝑘 timeframes is
+
+Φ(𝑘 )
+
+tran =
+
+𝑘 −1
+(cid:219)
+
+𝑡 =0
+
+(cid:16) ˆ𝜎𝑡 +1 = ˆ𝐹reg ( ˆ𝜋𝑡 , ˆ𝜎𝑡 )
+
+(cid:17)
+
+.
+
+(7)
+
+The value constraints are
+
+Φ(𝑘 )
+val = ( ˆ𝜎 0 = ˆ𝜌) ∧
+
+𝑘 −1
+(cid:219)
+
+𝑡 =0
+
+Bin( ˆ𝜋𝑡 ) ∧
+
+(cid:16) ˆ𝐹𝐶 ( ˆ𝜋𝑋 , ˆ𝜎𝑘 ) = 𝛼
+
+(cid:17)
+
+,
+
+(8)
+
+where ˆ𝜌 ∈ T|𝑅 | is the final reset vector to be optimized, and Bin( ˆ𝜋𝑡 )
+constrains every PI at timeframe 𝑡 to take only values in {0, 1}. The
+first term initializes the unrolled circuit with ˆ𝜌, the second term
+ensures that the initialization sequence is binary, and the last term
+enforces the 3-valued constant-cut condition at timeframe 𝑘.
+
+The hard constraint of the MaxSAT instance is
+hard = Φ(𝑘 )
+Φ(𝑘 )
+
+tran ∧ Φ(𝑘 )
+
+val
+
+.
+
+(9)
+
+To minimize reset, we maximize the number of free entries in the
+final reset vector. Therefore, the soft clauses
+Φ(𝑘 )
+soft = {( ˆ𝜌𝑟 = 𝑋 ) | 𝑟 ∈ 𝑅} .
+Maximizing the number of satisfied soft clauses is equivalent to
+minimizing the number of registers assigned concrete reset values
+in ˆ𝜌.
+
+(10)
+
+We encode the 3-valued logic in a Boolean MaxSAT solver using
+dual-rail variables. Each 3-valued assignment ˆ𝑣 ∈ {0, 1, 𝑋 } of a sig-
+nal in the circuit is represented by two Boolean variables (𝑣pos, 𝑣neg)
+with
+
+𝑋 ↔ (0, 0),
+
+1 ↔ (1, 0),
+while (1, 1) is forbidden. With this encoding, the binary-input con-
+straint can be enforced by blocking (0, 0) on each primary input.
+
+0 ↔ (0, 1),
+
+Reset Minimization in Sequential Circuits via Bounded Initialization Sequences
+
+Conference’17, July 2017, Washington, DC, USA
+
+For each register 𝑟 , we introduce an auxiliary Boolean variable 𝛾𝑟
+indicating whether ˆ𝜌 (𝑟 ) = 𝑋 , and add 𝛾𝑟 as a unit soft clause. The
+resulting Boolean MaxSAT instance consists of CNF hard clauses
+and one soft unit clause per register.
+
+The solver returns an optimal 3-valued final reset vector ˆ𝜌 and
+a corresponding binary initialization sequence ⟨𝜋 0, . . . , 𝜋𝑘 −1⟩ for
+the fixed-𝑘 subproblem. While the solution is only optimal in the 3-
+valued domain under Eq. (6), it will be further refined in Section 4.4.
+
+4.3 Iterative MaxSAT Solving
+The fixed-timeframe Partial MaxSAT formulation in Section 4.2
+returns an optimal solution only for the chosen number of time-
+frame length 𝑘. In practice, however, the number of resets in the
+final reset vector depends strongly on the initialization-sequence
+length. A small 𝑘 may lead to overly restrictive solutions, whereas
+a large 𝑘 significantly increases the size of the unrolled 3-valued
+instance and may become computationally prohibitive. Therefore,
+instead of committing to a single 𝑘 in advance, we solve a sequence
+of fixed-timeframe subproblems and retain the best solution found
+within the time budget as a heuristic.
+
+In this work, we use K = ⟨0, 1, 2, 4, 8, . . . ⟩ as our candidate time-
+frame lengths. For each 𝑘 ∈ K, we construct the MaxSAT instance
+with hard clauses Φ(𝑘 )
+and solve it un-
+der the remaining runtime budget. This yields a candidate solution
+( ˆ𝜌, Π), where ˆ𝜌 is the final reset vector and Π is the corresponding
+initialization sequence of length 𝑘.
+
+and soft clauses Φ(𝑘 )
+soft
+
+tran ∧ Φ(𝑘 )
+
+val
+
+Each candidate is evaluated by the number of its reset, namely
+
+cost( ˆ𝜌) = |{ 𝑟 ∈ 𝑅 | ˆ𝜌 (𝑟 ) ∈ {0, 1} }| ,
+and the best-so-far solution is updated whenever a smaller reset
+cost is found.
+
+The search terminates when either (1) the overall time budget is
+exhausted, (2) a zero-reset solution is found, or (3) further timeframe
+length fail to provide meaningful improvement. In this way, the
+iterative search balances solution quality and computational cost
+while preserving the scalability of the 3-valued MaxSAT baseline.
+At the end, the solution with the minimum reset cost is selected as
+the baseline result and passed to the Boolean refinement stage in
+Section 4.4.
+
+4.4 SAT-based Refinement
+The MaxSAT solution ( ˆ𝜌, Π) obtained from Section 4.3 is conser-
+vative. The baseline enforces the constant-cut condition in the
+3-valued domain; therefore, some concrete entries in the final reset
+vector ˆ𝜌 may not be necessary under exact Boolean reasoning. The
+goal of refinement is to release as many entries of ˆ𝜌 as possible
+from {0, 1} to 𝑋 , while preserving safe realization.
+
+Directly checking the original safe-realization condition would
+require the miter in Fig. 1, which requires an existential search of a
+witness state compatible with the initial reset vector. Instead, we
+use a stronger miter based on the witness construction described
+in the proof of Theorem 1. For a reached state at timeframe 𝑘, we
+construct a witness state 𝜎 ∗ as follows:
+
+𝜎 ∗|𝑅reset = ˆ𝜎 |𝑅reset,
+
+𝜎 ∗|𝑅free = 𝜎𝑘 |𝑅free
+
+,
+
+where 𝜎𝑘 is the reached state of the unrolled initialized circuit. That
+is, the reset registers of the witness are fixed by the initial reset
+
+vector, while the free registers are bound to the corresponding
+reached registers at timeframe 𝑘.
+
+Figure 4: The miter used in SAT-based refinement.
+
+The resulting Boolean miter, illustrated in Fig. 4, contains two
+copies of the circuit. The actual copy is unrolled for 𝑘 timeframes,
+initialized by the final reset vector ˆ𝜌, and driven by the initialization
+sequence Π. The reference copy is a single-frame circuit initialized
+by the witness state 𝜎 ∗. At the comparison timeframe, both circuits
+share the same PI assignment, and all COs are compared. This
+binding removes the existential search over compatible states in the
+refinement check. Consequently, the original ∀∃∀ safe-realization
+condition is replaced by a stronger witness-bound ∀∀ condition:
+
+∀𝜎 0 ∈ [ ˆ𝜌], ∀𝜋 ∈ B|𝐼 |,
+
+𝐹 (𝜋, 𝜎𝑘 ) = 𝐹 (𝜋, 𝜎 ∗),
+
+(11)
+
+where 𝜎𝑘 is obtained from 𝜎 0 by applying Π for 𝑘 timeframes. Be-
+cause Eq. (11) contains only universal quantifiers, we check it by
+constructing the SAT encoding from the negation of the miter. The
+miter output is the disjunction of all CO mismatches between the
+actual circuit and the witness-bound reference circuit. Thus, a satis-
+fying assignment corresponds to a counterexample: a completion of
+the currently free reset entries and a comparison PI assignment un-
+der which some CO differs. If this SAT encoding is UNSAT, then no
+such counterexample exists, and the witness-bound ∀∀ equivalence
+condition holds.
+
+Eq. (11) is stronger than the original safe-realization definition
+because the existential witness is fixed by the binding construction
+instead of being chosen freely. Therefore, every solution that passes
+the check is sound with respect to safe realization, but some valid
+solutions may be rejected. Hence, the refinement is sound but not
+complete.
+
+In practice, each reset in ˆ𝜌 is encoded as an assumption literal
+in the Boolean miter. For a register 𝑟 with ˆ𝜌 (𝑟 ) = 1, we use the
+assumption literal 𝑣𝑟 ; for ˆ𝜌 (𝑟 ) = 0, we use ¬𝑣𝑟 . Removing this
+assumption releases the corresponding reset entry to 𝑋 . When the
+miter is UNSAT, the returned UNSAT core identifies a subset of
+reset assumptions already sufficient to prove the witness-bound
+equivalence. Thus, assumptions outside the core can be removed
+immediately, and the remaining assumptions are tested by single-
+reset deletion. Algorithm 1 summarizes the complete refinement
+flow.
+
+Initialization SequencePIPOPIPOPIPOReferencePOTimeframe 0PITimeframe 1Timeframe kEQ?Conference’17, July 2017, Washington, DC, USA
+
+Anon.
+
+Algorithm 1 UNSAT-Core-Guided SAT-Based Refinement
+Input: AIG representation 𝐺N , solution ( ˆ𝜌, Π), initial reset vector ˆ𝜎
+Output: Refined solution ˆ𝜌′
+1: M ← Build-Counterexample-Miter(𝐺N, Π, ˆ𝜎 )
+2: 𝐴 ← { 𝑣𝑟 | ˆ𝜌 (𝑟 ) = 1, 𝑟 ∈ 𝑅 } ∪ { ¬𝑣𝑟 | ˆ𝜌 (𝑟 ) = 0, 𝑟 ∈ 𝑅 }
+3: (res, 𝐶 ) ← Solve-SAT-with-Core( M, 𝐴)
+
+⊲ res ∈ {SAT, UNSAT}
+⊲ 𝐶 is an UNSAT core if res = UNSAT
+⊲ must be UNSAT as the initial solution is valid
+
+⊲ accept deletion and prune further by core
+
+⊲ SAT: keep the reset
+
+𝐴′ ← 𝐴 \ {𝑙𝑟 }
+(res, 𝐶 ) ← Solve-SAT-with-Core( M, 𝐴′ )
+if res = UNSAT then
+
+𝐴 ← 𝐶
+
+4: 𝐴 ← 𝐶
+5: for all 𝑙𝑟 ∈ 𝐴 do
+6:
+7:
+8:
+9:
+10:
+11:
+12: ˆ𝜌′ ← ˆ𝜌
+13: for all 𝑟 ∈ 𝑅 with ˆ𝜌 (𝑟 ) ∈ {0, 1} do
+14:
+15:
+16: return ˆ𝜌′
+
+ˆ𝜌′ (𝑟 ) ← 𝑋
+
+continue
+
+else
+
+if the assumption literal of 𝑟 is not in 𝐴 then
+
+Using this algorithm, the refinement recovers part of the con-
+servatism introduced by the 3-valued baseline while preserving
+soundness under exact Boolean checking. The refined final reset
+vector ˆ𝜌 ′, together with the initialization sequence Π, is reported
+as the final solution.
+
+5 Experimental Results
+The proposed method was implemented in C/C++ on top of the
+open-source logic synthesis framework ABC [3]. All experiments
+were conducted on a workstation with Ubuntu 24.04.3 LTS, 48 CPUs,
+and 256 GB memory. EvalMaxSAT [2] was adopted for MaxSAT
+solving.
+
+We evaluate the proposed method on the sequential ISCAS’89 [4]
+and ITC’99 [8] benchmark suites. All benchmarks were processed
+by ABC using commands strash;&dc2 [11]. The resulting circuit
+statistics were reported in Table 1, including AIG node and register
+(latch) counts.
+
+Given a circuit and a specified fraction of reset registers, we
+randomly generated 10 initial reset vectors for evaluation. Unless
+otherwise stated, all reported results are averaged over 10 random
+initial reset vectors.
+
+We define the reset ratio:
+
+RR =
+
+#Reset
+#Reg
+
+,
+
+i.e., the ratio of the number of reset registers to the number of all
+registers, as a metric for quantifying the reset cost of a testcase.
+
+5.1 Results Under Full Initial Reset
+We evaluated the proposed flow on circuits with fully specified (no
+X-value) initial reset vectors, with a 600-second runtime budget for
+iterative MaxSAT solving per circuit under an initial reset vector.
+Afterward, SAT-based refinement (Section 4.4) was applied to the
+best solution found. For circuit s38584, only a single UNSAT-core-
+based refinement was performed due to the high cost of full iteration.
+The reported runtime includes both stages.
+
+Table 1 presents per-benchmark results, including the numbers
+of primary inputs/outputs, AIG nodes, registers, the baseline reset
+ratio (with initialization sequence length 𝑘 = 0), the best ratio from
+iterative MaxSAT before refinement, the final ratio after refine-
+ment, the selected timeframe length, total runtime, and refinement
+
+runtime. The last rows report both the arithmetic mean and the
+aggregate reset ratio over all benchmarks.
+
+As seen from Table 1, the proposed iterative MaxSAT flow sub-
+stantially reduces the reset requirement compared with the 𝑘 = 0
+baseline. On the aggregate statistics, the reset ratio decreases from
+90.83% at 𝑘 = 0 to 56.52% before refinement, and further to 56.25% af-
+ter refinement. The results demonstrate that even under a practical
+fixed runtime budget, short initialization sequences can signifi-
+cantly reduce the required reset registers.
+
+A closer examination of the per-benchmark results reveals two
+trends. First, at the trivial baseline (𝑘 = 0), many benchmarks
+exhibit reset ratios near 100%, indicating that most registers must
+be explicitly reset. After iterative optimization, these ratios drop
+significantly, with some benchmarks reaching zero-reset solutions
+even before refinement. Second, although the refinement stage
+typically yields smaller improvements than the MaxSAT search, it
+remains beneficial for harder cases and is particularly effective when
+the initial reset vector is relaxed from fully specified to partially
+specified, as will be discussed in Section 5.3.
+
+Although the initial reset vectors in this experiment are fully
+specified, the final initialized states do not always match them bit
+by bit. This suggests that exact per-register matching is stronger
+than necessary and motivates the safe-realization formulation. The
+next subsection isolates this effect through an ablation study, while
+Section 5.3 further examines how additional unspecified entries in
+the initial reset vector affect reset reduction.
+
+5.2 Direct Register Matching vs. Safe
+
+Realization
+
+A key difference from prior reset minimization formulations is that
+we do not require bitwise matching of the specified reset registers;
+instead, correctness is defined via safe realization (Definition 1). To
+isolate the impact of this modeling choice, we conduct an ablation
+study comparing two target formulations on the same benchmarks
+and initial reset conditions with a fixed timeframe length 𝑘 = 4.
+Refinement is disabled to ensure the results reflect only the effect
+of the induced constant cut. In the first formulation, Direct Match-
+ing, the final state at timeframe 𝑘 is required to match all specified
+target registers exactly. In the second, we use the proposed safe
+realization induced by the initial reset vector. Thus, the only differ-
+ence is whether correctness is enforced via per-register equality or
+functional safe realization.
+
+Among the 49 studied circuits under a fully-specified initial reset
+vector, Table 2 shows results for some benchmarks with larger
+differences in reset ratio. Many easy instances already achieve zero-
+reset under both formulations, so the benefit of safe realization
+appears mainly in nontrivial cases.
+
+Across all the 490 instances of the circuit and initial reset vector
+pairs, the proposed formulation outperforms direct register match-
+ing in 135 cases, ties in 355 cases, and is never worse. Restricting to
+nontrivial instances (where direct matching yields a nonzero reset),
+our method further reduces the required resets by an aggregate
+margin of 1.75% compared to the direct matching formulation.
+
+The statistics from Section 5.1 provide further insight. Under
+3-valued simulation, 89.67% of registers are driven to their exact
+specified values, while 9.68% remain unknown and 0.64% even
+
+Reset Minimization in Sequential Circuits via Bounded Initialization Sequences
+
+Conference’17, July 2017, Washington, DC, USA
+
+Table 1: Detailed results under the 100% specified-FF-ratio setting. All quantities are averaged over 10 random reset vectors.
+
+Benchmark
+
+#PI
+
+#PO
+
+#Node
+
+#Reg
+
+#Specified
+
+s27
+s298
+s344
+s349
+s382
+s386
+s400
+s420
+s444
+s510
+s526
+s641
+s713
+s820
+s832
+s838
+s953
+s1196
+s1238
+s1423
+s1488
+s5378
+s9234
+s13207
+s15850
+s35932
+s38417
+s38584
+
+b01
+b02
+b03
+b04
+b05
+b06
+b07
+b08
+b09
+b10
+b11
+b12
+b13
+b14
+b15
+b17
+b18
+b19
+b20
+b21
+b22
+
+5
+6
+12
+12
+4
+10
+6
+19
+6
+22
+6
+36
+36
+21
+21
+37
+19
+14
+15
+18
+9
+36
+37
+63
+78
+36
+29
+39
+
+2
+1
+4
+11
+1
+2
+1
+9
+1
+11
+7
+5
+10
+32
+36
+37
+36
+21
+32
+32
+32
+
+1
+6
+11
+11
+6
+7
+6
+1
+6
+7
+6
+24
+23
+19
+19
+1
+23
+14
+14
+5
+19
+49
+39
+152
+150
+320
+106
+304
+
+2
+1
+4
+8
+36
+6
+8
+4
+1
+6
+6
+6
+10
+54
+70
+97
+22
+30
+22
+22
+22
+
+7
+79
+98
+97
+100
+120
+105
+119
+101
+207
+129
+122
+122
+244
+251
+246
+326
+445
+482
+443
+560
+1007
+1371
+2069
+2780
+8129
+8205
+9919
+
+35
+16
+126
+498
+531
+36
+340
+133
+123
+171
+487
+958
+228
+4428
+7553
+23571
+61981
+118805
+9350
+9393
+13963
+
+3
+14
+15
+15
+21
+6
+21
+16
+21
+6
+21
+19
+19
+5
+5
+32
+29
+18
+18
+74
+6
+179
+211
+638
+534
+1728
+1636
+1426
+
+5
+4
+30
+66
+34
+9
+49
+21
+28
+17
+31
+121
+53
+245
+449
+1415
+3320
+6642
+490
+490
+735
+
+3
+14
+15
+15
+21
+6
+21
+16
+21
+6
+21
+19
+19
+5
+5
+32
+29
+18
+18
+74
+6
+179
+211
+638
+534
+1728
+1636
+1426
+
+5
+4
+30
+66
+34
+9
+49
+21
+28
+17
+31
+121
+53
+245
+449
+1415
+3320
+6642
+490
+490
+735
+
+Average
+Aggregate
+
+975
+
+1786
+
+290609
+
+20990
+
+20990
+
+𝑘 = 0
+
+76.67
+100.00
+84.00
+84.00
+100.00
+100.00
+100.00
+100.00
+100.00
+100.00
+100.00
+100.00
+100.00
+100.00
+100.00
+100.00
+100.00
+87.22
+86.11
+99.46
+100.00
+72.35
+80.28
+69.81
+88.56
+100.00
+76.07
+98.02
+
+100.00
+97.50
+80.67
+100.00
+86.47
+100.00
+86.12
+93.33
+100.00
+100.00
+83.87
+95.45
+93.21
+92.00
+97.10
+97.07
+91.55
+91.53
+88.10
+89.69
+87.66
+
+92.94
+90.83
+
+Reset Ratio (%)
+
+𝑘 = best
+
+refined
+
+Best 𝑘
+
+Runtime (s)
+
+Refine Time (s)
+
+0.00
+28.57
+20.00
+20.00
+0.00
+0.00
+0.00
+100.00
+0.00
+98.33
+7.14
+1.58
+1.58
+30.00
+30.00
+100.00
+10.69
+0.00
+0.00
+0.00
+10.00
+0.00
+24.93
+21.82
+8.67
+50.00
+41.11
+29.59
+
+60.00
+57.50
+3.33
+3.03
+62.35
+27.78
+51.43
+90.00
+26.43
+50.59
+70.97
+67.85
+62.08
+0.41
+54.90
+65.42
+69.83
+77.76
+39.55
+38.35
+44.59
+
+33.84
+56.52
+
+0.00
+28.57
+20.00
+20.00
+0.00
+0.00
+0.00
+100.00
+0.00
+98.33
+7.14
+1.58
+1.58
+30.00
+30.00
+100.00
+10.34
+0.00
+0.00
+0.00
+10.00
+0.00
+22.94
+21.02
+8.30
+50.00
+39.22
+29.59
+
+60.00
+57.50
+3.33
+2.88
+61.76
+27.78
+51.43
+89.52
+26.07
+49.41
+70.97
+66.61
+61.51
+0.41
+54.88
+65.34
+69.76
+77.71
+39.29
+37.51
+44.52
+
+33.61
+56.25
+
+1.3
+1.5
+1.6
+1.6
+1.8
+3
+2
+0
+2
+0.1
+1.9
+1.9
+1.9
+0.8
+0.8
+0
+3.2
+1
+1.3
+4.4
+0.9
+16
+20
+16
+33.6
+0.5
+5.4
+20
+
+1
+1.4
+16
+8
+2.8
+1.2
+2.8
+0.4
+10.6
+11.8
+0.8
+7.1
+5
+16
+16
+16.8
+9.6
+2.6
+11.2
+11.6
+5.6
+
+6.2
+
+0.002
+0.005
+0.006
+0.006
+0.005
+0.006
+0.005
+0.004
+0.006
+0.005
+0.006
+0.005
+0.006
+0.005
+0.005
+0.005
+0.052
+0.016
+0.017
+0.044
+0.009
+0.408
+97.943
+304.401
+436.214
+56.94
+528.428
+603.633
+
+0.004
+0.003
+0.14
+0.29
+0.061
+0.004
+0.05
+0.006
+0.098
+1.464
+0.024
+226.213
+0.131
+49.259
+613.736
+712.059
+1045.369
+1181.302
+534.064
+565.322
+630.202
+
+154.857
+
+0.001
+0.001
+0.001
+0.001
+0.001
+0.001
+0.001
+0.001
+0.001
+0.001
+0.001
+0.001
+0.001
+0.001
+0.001
+0.001
+0.004
+0.012
+0.011
+0.002
+0.002
+0.011
+6.464
+5.514
+77.254
+55.311
+16.018
+0.581
+
+0.001
+0.001
+0.002
+0.031
+0.003
+0.001
+0.003
+0.002
+0.004
+0.016
+0.002
+0.067
+0.006
+3.737
+10.838
+105.875
+435.358
+574.429
+89.433
+80.576
+29.286
+
+30.426
+
+Table 2: Ablation study comparing direct register matching
+and the proposed safe realization.
+
+realization preserves correctness while enabling additional reset
+reduction.
+
+Benchmark
+
+#Reg
+
+Reset Ratio (%)
+
+Runtime (s)
+
+Direct
+
+Ours
+
+Δ
+
+Direct
+
+Ours
+
+s13207
+s38417
+b07
+b14
+b20
+
+638
+1636
+49
+245
+490
+
+31.74
+46.31
+58.37
+46.41
+56.86
+
+28.15
+41.22
+50.00
+42.04
+52.27
+
+-3.59
+-5.09
+-8.37
+-4.37
+-4.59
+
+0.68
+88.28
+0.02
+2.31
+12.58
+
+1.03
+135.78
+0.02
+4.72
+18.18
+
+settle at the opposite constant value. Under direct matching, such
+outcomes would be considered incorrect; under safe realization,
+they are formally verified to be functionally correct. This confirms
+that the observed reset reduction comes from allowing functionally
+valid flexibility rather than forcing exact bitwise agreement on all
+registers.
+
+Overall, this ablation supports a central claim: enforcing ex-
+act per-register equality is stronger than necessary, whereas safe
+
+5.3 Effects of Partial Initial Reset
+We study the effect of varying the fraction of X-values in the ini-
+tial reset vector on achievable reset reduction and runtime. For
+each benchmark, we randomly mask register bits to generate initial
+reset conditions with 75%, 50%, and 25% of registers assigned con-
+crete values {0, 1}, while retaining the fully specified (100%) case
+as a baseline. This experiment evaluates how relaxing the initial
+condition affects both reset reduction and computational cost.
+
+Table 3 summarizes this experiment at the benchmark-suite level.
+Each column corresponds to a ratio of reset registers in the initial
+reset vector. For each benchmark set, the row 𝑘 = 0 reports the
+trivial baseline without an initialization sequence, Best reports the
+best reset ratio found during the iterative MaxSAT search before
+refinement, and Refined reports the final reset ratio after the SAT-
+based refinement. All values are aggregate reset ratios computed
+
+Conference’17, July 2017, Washington, DC, USA
+
+Anon.
+
+Table 3: Aggregate reset ratio under different fractions of
+initial reset registers.
+
+Benchmark
+
+Stage
+
+ISCAS’89
+
+ITC’99
+
+Combined
+
+𝑘 = 0
+𝑘 =Best
+Refined
+
+𝑘 = 0
+𝑘 =Best
+Refined
+
+𝑘 = 0
+𝑘 =Best
+Refined
+
+Ratio of Specified Registers
+
+100%
+
+75%
+
+50%
+
+25%
+
+88.49%
+33.66%
+33.43%
+
+91.93%
+65.73%
+65.64%
+
+90.83%
+55.44%
+55.31%
+
+67.95%
+29.94%
+29.50%
+
+70.19%
+53.03%
+52.40%
+
+69.47%
+45.62%
+45.05%
+
+46.35%
+24.93%
+24.43%
+
+47.51%
+39.70%
+39.15%
+
+47.14%
+34.96%
+34.43%
+
+24.05%
+15.57%
+15.31%
+
+24.51%
+22.44%
+22.22%
+
+24.36%
+20.24%
+20.00%
+
+from the summed numbers of required reset and total registers over
+the corresponding benchmark set.
+
+The results show a systematic difference between the two bench-
+mark suites: ISCAS’89 generally admits lower final reset ratios than
+ITC’99. A likely reason is that many ITC’99 circuits are larger, mak-
+ing it harder to reach sufficiently effective timeframe lengths within
+the same runtime budget. The statistic shows that 31% of the ITC’99
+instances time out before an optimal solution is found, while only
+13% of the ISCAS’89 instances report the same.
+
+Regarding computational cost, relaxing the initial reset vector
+tends to reduce the end-to-end runtime of the proposed flow. Across
+all evaluated instances, the average runtime of the iterative MaxSAT
+search decreases from 135.13 seconds in the fully specified setting
+to 133.72, 119.32, and 82.08 seconds when the ratio of reset registers
+is reduced to 75%, 50%, and 25%, respectively. A similar reduction
+is observed in the SAT-based refinement stage, where the average
+refinement time decreases from 32.97 seconds to 3.43 seconds.
+
+This trend correlates with shorter selected initialization lengths:
+the average selected timeframe length decreases from 6.9 to 6.5, 4.8,
+and 3.4 as the ratio of reset registers decreases from 100% to 75%,
+50%, and 25%. The fixed-𝑘 behavior behind this trend is examined
+next.
+
+5.4 Effects of Initialization Sequence Length
+We examine how the initialization-sequence length affects reset
+reduction and runtime. Circuits s9234 and b14 are selected for
+demonstration. For each benchmark, we solve the fixed-timeframe
+MaxSAT formulation over a range of timeframe lengths and report
+the pre-refinement result for both fully specified and 50%-specified
+initial reset vectors.
+
+Figure 5 shows that increasing 𝑘 generally improves reset re-
+duction, but the improvement eventually saturates. This behavior
+supports the iterative search strategy in Section 4.3: small 𝑘 values
+are often insufficient, while very large 𝑘 values provide limited
+additional reset reduction but substantially increase the size of the
+unrolled MaxSAT instance.
+
+The runtime curves are more instance-dependent. For b14, the
+50%-specified and fully specified settings have similar fixed-𝑘 run-
+times, whereas for s9234, the 50%-specified setting can be slightly
+slower at the same 𝑘. Thus, relaxing the initial reset vector does not
+uniformly simplify each fixed-𝑘 MaxSAT instance. Nevertheless,
+around the point where the reset ratio reaches zero or becomes
+close to its saturated value, runtime often exhibits a small local
+
+Figure 5: Reset ratio and runtime versus timeframe length
+(upper s9234, lower b14). The red and blue line corresponds
+to the fully specified and the 50% specified initial reset vector.
+
+decrease or plateau before growing rapidly again. This suggests
+that fixed-𝑘 difficulty depends not only on the size of the unrolled
+instance, but also on whether the chosen timeframe length exposes
+a high-quality or near-optimal reset solution.
+
+6 Conclusion
+This paper studied reset minimization for sequential circuits under a
+user-specified initial reset vector. Unlike prior circuit-initialization
+methods that mainly drive registers into arbitrary known values,
+our formulation aims to realize a specified startup requirement
+with fewer reset registers. Correctness is defined by safe realization,
+which allows the initialized state to differ from the initial reset
+vector as long as it is functionally equivalent at the COs to some
+compatible state.
+
+To make the problem scalable, we proposed a flow based on a
+target-induced constant cut, 𝑘-timeframe 3-valued MaxSAT encod-
+ing, iterative search over initialization lengths, and exact SAT-based
+refinement. The constant cut provides a sufficient condition that
+avoids the original ∀∃∀ safe-realization check, while the refine-
+ment step recovers part of the conservatism introduced by 3-valued
+reasoning.
+
+Experimental results on ISCAS’89 and ITC’99 benchmarks show
+that the proposed method substantially reduces reset cost under
+practical time budgets. Under fully specified initial reset vectors, the
+aggregate reset ratio decreases from 90.83% at 𝑘 = 0 to 56.52% after
+iterative MaxSAT search, and further to 56.25% after refinement.
+Additional experiments show that safe realization is less restrictive
+than exact register matching and that partial initial reset vectors
+further improve reset reduction and runtime by allowing high-
+quality solutions at shorter initialization lengths.
+
+Future work includes deriving less conservative approximations,
+strengthening the current refinement step, and studying integration
+with practical reset-network implementation flows.
+
+Timeframe LengthReset Ratio (%)0.00%25.00%50.00%75.00%100.00%020406050%100%Timeframe LengthRuntime (s)0.010.1110100020406050%100%Timeframe LengthReset Ratio (%)0.00%25.00%50.00%75.00%100.00%01020304050%100%Timeframe LengthRuntime (s)0.050.10.5151001020304050%100%Reset Minimization in Sequential Circuits via Bounded Initialization Sequences
+
+Conference’17, July 2017, Washington, DC, USA
+
+References
+[1] Carlos Ansótegui, Maria Luisa Bonet, and Jordi Levy. 2013. SAT-based MaxSAT
+
+algorithms. Artificial Intelligence 196 (2013), 77–105.
+
+[2] Florent Avellaneda. 2020. A short description of the solver EvalMaxSAT. In
+Proceedings of MaxSAT Evaluation 2020: Solver and Benchmark Descriptions. 8.
+[3] Robert Brayton and Alan Mishchenko. 2010. ABC: An academic industrial-
+strength verification tool. In Proceedings of the 22nd International Conference on
+Computer Aided Verification (CAV). Springer, 24–40.
+
+[4] Franc Brglez, David Bryan, and Krzysztof Kozminski. 1989. Combinational
+profiles of sequential benchmark circuits. In Proceedings of the IEEE International
+Symposium on Circuits and Systems (ISCAS). 1929–1934.
+
+[5] Kwang-Ting Cheng. 1996. Gate-level test generation for sequential circuits. ACM
+Transactions on Design Automation of Electronic Systems (TODAES) 1, 4 (1996),
+405–442.
+
+[6] Hong-Zu Chou, Kai-Hui Chang, and Sy-Yen Kuo. 2009. Handling don’t-care con-
+ditions in high-level synthesis and application for reducing initialized registers.
+In Proceedings of the 46th Annual Design Automation Conference (DAC). 412–415.
+[7] Stephen A Cook. 2023. The complexity of theorem-proving procedures. In Logic,
+automata, and computational complexity: The works of Stephen A. Cook. 143–152.
+[8] Fulvio Corno, Matteo Sonza Reorda, and Giovanni Squillero. 2000. RT-level
+ITC’99 benchmarks and first ATPG results. IEEE Design Test of Computers 17, 3
+(2000), 44–53. doi:10.1109/54.867894
+
+[9] Dominik Erb, Michael A. Kochte, Matthias Sauer, Hans-Joachim Wunderlich, and
+Bernd Becker. 2013. Accurate Multi-Cycle ATPG in Presence of X-Values. In
+Proceedings of the 22nd IEEE Asian Test Symposium (ATS). 245–250. doi:10.1109/
+ATS.2013.53
+
+[10] Zvi Kohavi and Niraj K Jha. 2009. Switching and finite automata theory. Cambridge
+
+University Press.
+
+[11] Alan Mishchenko, Satrajit Chatterjee, and Robert Brayton. 2006. DAG-aware
+AIG rewriting. In Proceedings of the 43rd annual Design Automation Conference
+(DAC). 532–535.
+
+[12] I. Pomeranz and S.M. Reddy. 1994. Application of homing sequences to syn-
+chronous sequential circuit testing. IEEE Trans. Comput. 43, 5 (1994), 569–580.
+doi:10.1109/12.280804
+
+[13] Sven Reimer, Matthias Sauer, Tobias Schubert, and Bernd Becker. 2014. Using
+MaxBMC for Pareto-optimal circuit initialization. In 2014 Design, Automation
+Test in Europe Conference Exhibition (DATE). 1–6. doi:10.7873/DATE.2014.161
+
+[14] Sven Sandberg. 2005. 1 Homing and Synchronizing Sequences. Springer Berlin
+
+Heidelberg, Berlin, Heidelberg, 5–33. doi:10.1007/11498490_2
+
+[15] Matthias Sauer, Sven Reimer, Sudhakar M. Reddy, and Bernd Becker. 2014. Ef-
+ficient SAT-Based Circuit Initialization for Larger Designs. In 2014 27th Inter-
+national Conference on VLSI Design and 2014 13th International Conference on
+Embedded Systems. 62–67. doi:10.1109/VLSID.2014.18
+
+[16] Mikhail V. Volkov. 2008. Synchronizing Automata and the Černý Conjecture. In
+Language and Automata Theory and Applications, Carlos Martín-Vide, Friedrich
+Otto, and Henning Fernau (Eds.). Springer Berlin Heidelberg, Berlin, Heidelberg,
+11–27.
+
+[17] J.A. Wahbeh and D.G. Saab. 1994. On the initialization of sequential circuits.
+In Proceedings., International Test Conference. 233–239. doi:10.1109/TEST.1994.
+527954
+
+[18] Jalal A Wehbeh and Daniel G Saab. 1998. Initialization of Sequential Circuits and
+its Application to ATPG. Journal of Electronic Testing 13, 3 (1998), 259–271.
+[19] Srihari Yechangunja, Raj Shekhar, Mohit Kumar, Nikhil Tripathi, Abhishek Mittal,
+Abhishek Ranjan, Jianfeng Liu, Minyoung Mo, Kyungtae Do, Jung Yun Choi, and
+SungHo Park. 2016. Sequential analysis driven reset optimization to improve
+power, area and routability. In 2016 Design, Automation Test in Europe Conference
+Exhibition (DATE). 551–554.
+
+

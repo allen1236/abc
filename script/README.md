@@ -1,6 +1,17 @@
 # `script/` — minr 實驗與迴歸工具
 
-本目錄放與 `&minr`（ABC 指令）相關的 Python 腳本。實作與 CLI 細節見 `src/minr/dev.md`；研究脈絡見 `src/minr/spec.md`。
+本目錄放與 `&minr` 相關的 Python 腳本。術語與論文對照見 `doc/spec.md` §0；CLI / report 見 `doc/usage.md`。
+
+## 論文指標 ↔ CSV / report
+
+| 論文 | 腳本解析欄位 |
+|------|----------------|
+| reset cost | `required_reset` |
+| reset ratio \(RR\) | `r_f` |
+| timeframe length \(k\) | `best_k`（`-O 1`）或 per-\(k\) 欄位（`k.py`） |
+| iterative MaxSAT stage | `-O 1` / `OPTIMIZE_MODE=1` |
+| SAT-based refinement | `-x` / `REFINE_MODE` |
+| initial reset vector（partial spec） | `-D` / `DC_RATIO` |
 
 ## 前置條件
 
@@ -24,7 +35,7 @@
 
 ## `minr_regression.py` — CI／本機迴歸
 
-固定多組 benchmark、多個 **`-k`**、seed、DC ratio，並對較小電路加跑 **`-O 1`**；與 `minr_regression_baseline.json` 比對解的指標（`required_reset`、`r_s`、verify 等），**不**比對兩種模式互斥時間。
+固定多組 benchmark、多個 fixed-\(k\) 子問題、seed、DC ratio，並對較小電路加跑 **iterative MaxSAT**（`-O 1`）；與 baseline 比對 reset cost、`r_f`（**reset ratio**）、verify 等。
 
 ```bash
 # 與 baseline 比對（通過則 exit 0）
@@ -41,9 +52,9 @@ python3 script/minr_regression.py --dry-run
 
 ---
 
-## `parallel.py` — 批次實驗（平行）
+## `parallel.py` — 批次實驗（iterative MaxSAT + refinement）
 
-`benchmarks × seeds × dc_ratio` 平行跑 `&minr`，依完成順序寫入 **一筆一列** 的 detail CSV。
+`benchmarks × seeds × dc_ratio` 平行跑 `&minr -O 1`（§4.3 iterative MaxSAT；可開 `-x` 做 §4.4 refinement）。
 
 ```bash
 python3 script/parallel.py [output_prefix] [max_workers]
@@ -53,13 +64,13 @@ python3 script/parallel.py [output_prefix] [max_workers]
 - **第二參數**：並行數（可改 `MINR_EXP_WORKERS`）。
 - 實驗矩陣（`BENCHMARKS`、`K` 或 `OPTIMIZE_MODE`、`SEEDS`、`DC_RATIO`、`TOTAL_TIMEOUT` 等）在腳本開頭 **常數區** 修改。
 
-`-O 1` 時 CSV 的 **`opt_status`**：`timeout_with_best` / `unsat_with_best` 見 `src/minr/dev.md`。**`-t` 與 `runtime_sec` 為執行緒 CPU 時間**（多開 `abc` 時較合理）；`timeout_with_best` 時回報的 `runtime_sec` 會對齊約 **`-t` + refine**。
+`-O 1` 時 CSV 的 **`opt_status`** 描述 iterative MaxSAT 結束原因；見 `doc/usage.md`。
 
 ---
 
-## `k.py` — 依 k 掃描匯出 CSV
+## `k.py` — fixed-timeframe 子問題掃描（§4.2）
 
-搭配 **`&minr -O 1 -k K_MIN -K K_MAX`**（dense k sweep），從 report 解析每個 k 的指標，寫入 CSV。並行介面與 `parallel.py` 類似：
+對每個 timeframe length \(k\in[K_{\min},K_{\max}]\) 各跑一次 **single-\(k\)** MaxSAT（不帶 `-O`），每個 \(k\) 享有完整 `-t` 預算；用於 \(k=0\) baseline 或 per-\(k\) 曲線。
 
 ```bash
 python3 script/k.py [output_prefix] [max_workers]
@@ -96,6 +107,8 @@ python3 script/benchmark_io_csv.py -o script/exp/benchmark_io.csv
 
 | 主題 | 文件 |
 |------|------|
-| 指令列旗標、執行流程、report 欄位 | `src/minr/dev.md` |
-| 問題定義、演算法、`-O` 語意 | `src/minr/spec.md` |
+| 問題定義、safe realization、§4 方法 | `doc/spec.md` |
+| 指令列、report ↔ 論文術語 | `doc/usage.md` |
+| 程式 walkthrough | `doc/implementation.md` |
+| 實驗與 §5 對應 | `doc/experiment.md` |
 | 本目錄腳本 | 本檔 `script/README.md` |

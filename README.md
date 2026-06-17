@@ -1,125 +1,76 @@
-[![.github/workflows/build-posix.yml](https://github.com/berkeley-abc/abc/actions/workflows/build-posix.yml/badge.svg)](https://github.com/berkeley-abc/abc/actions/workflows/build-posix.yml)
-[![.github/workflows/build-windows.yml](https://github.com/berkeley-abc/abc/actions/workflows/build-windows.yml/badge.svg)](https://github.com/berkeley-abc/abc/actions/workflows/build-windows.yml)
-[![.github/workflows/build-posix-cmake.yml](https://github.com/berkeley-abc/abc/actions/workflows/build-posix-cmake.yml/badge.svg)](https://github.com/berkeley-abc/abc/actions/workflows/build-posix-cmake.yml)
+# `&minr` — Hardware-Reset Minimization via Bounded Initialization Sequences（ABC fork）
 
-# ABC: System for Sequential Logic Synthesis and Formal Verification
+本 repository 為 ABC fork，新增指令 `&minr`，實作論文 *Reset Minimization in Sequential Circuits via Bounded Initialization Sequences* 的流程：
 
-ABC is always changing but the current snapshot is believed to be stable.
+在給定 **initial reset vector** \(\hat\sigma\)（register 上的 \(0/1/X\) 啟動需求）與 bounded **initialization sequence** 長度 \(k\) 下，求 **final reset vector** \(\hat\rho\) 與 **initialization sequence** \(\Pi\)，使 reachable states **safely realize** \(\hat\sigma\)，並最小化 hardware **reset cost**（\(\hat\rho\) 中 0/1 的 register 數）。
 
-## ABC fork with new features
+此專案同時提供：
+- `&minr` 的 C/C++ 實作（`src/minr/`）
+- 可重現的實驗與迴歸腳本（`script/`）
+- 文件（`doc/`；舊草稿在 `doc/archive/`）
 
-Here is a [fork](https://github.com/yongshiwo/abc.git) of ABC containing Agdmap, a novel technology mapper for LUT-based FPGAs.  Agdmap is based on a technology mapping algorithm with adaptive gate decomposition [1]. It is a cut enumeration based mapping algorithm with bin packing for simultaneous wide gate decomposition, which is a patent pending technology.
+## 快速開始
 
-The mapper is developed and maintained by Longfei Fan and Prof. Chang Wu at Fudan University in Shanghai, China.  The experimental results presented in [1] indicate that Agdmap can substantially improve area (by 10% or more) when compared against the best LUT mapping solutions in ABC, such as command "if".
+### 編譯
 
-The source code is provided for research and evaluation only. For commercial usage, please contact Prof. Chang Wu at wuchang@fudan.edu.cn.
+在 repo 根目錄：
 
-References:
+```bash
+make abc
+```
 
-[1] L. Fan and C. Wu, "FPGA technology mapping with adaptive gate decompostion", ACM/SIGDA FPGA International Symposium on FPGAs, 2023. 
+### 執行 `&minr`（單次固定 k）
 
-## Compiling:
+```bash
+./abc -c "read_aiger benchmarks/iscas89/s27.aig; &get; &minr -k 8 -o _/tmp/minr.log"
+```
 
-To compile ABC as a binary, download and unzip the code, then type `make`.
-To compile ABC as a static library, type `make libabc.a`.
+### 執行 `&minr`（iterative MaxSAT solving，§4.3：`-O 1`）
 
-When ABC is used as a static library, two additional procedures, `Abc_Start()` 
-and `Abc_Stop()`, are provided for starting and quitting the ABC framework in 
-the calling application. A simple demo program (file src/demo.c) shows how to 
-create a stand-alone program performing DAG-aware AIG rewriting, by calling 
-APIs of ABC compiled as a static library.
+```bash
+./abc -c "read_aiger benchmarks/iscas89/s27.aig; &get; &minr -O 1 -t 600 -o _/tmp/minr.log"
+```
 
-To build the demo program
+`&minr` 的完整參數（包含 `-r/-D/-x/-K/-S/-p`）請見 `usage.md`。
 
- * Copy demo.c and libabc.a to the working directory
- * Run `gcc -Wall -g -c demo.c -o demo.o`
- * Run `g++ -g -o demo demo.o libabc.a -lm -ldl -lreadline -lpthread`
+## 文件導覽（先看這裡就能進入狀況）
 
-To run the demo program, give it a file with the logic network in AIGER or BLIF. For example:
+- `doc/spec.md`：問題定義、safe realization、§4 方法（術語對齊論文）
+- `doc/usage.md`：`&minr` 的 CLI/參數、輸入輸出與 report 格式
+- `doc/implementation.md`：逐段對齊 `src/minr/` 的程式 walkthrough（資料結構/函式與 spec 對照）
+- `doc/experiment.md`：benchmark、腳本、如何跑批次實驗與彙總數據
 
-    [...] ~/abc> demo i10.aig
-    i10          : i/o =  257/  224  lat =    0  and =   2396  lev = 37
-    i10          : i/o =  257/  224  lat =    0  and =   1851  lev = 35
-    Networks are equivalent.
-    Reading =   0.00 sec   Rewriting =   0.18 sec   Verification =   0.41 sec
+較早的設計草稿（含論文抽取文字）在 `doc/archive/`。
 
-The same can be produced by running the binary in the command-line mode:
+## Repository 內與 `&minr` 直接相關的位置
 
-    [...] ~/abc> ./abc
-    UC Berkeley, ABC 1.01 (compiled Oct  6 2012 19:05:18)
-    abc 01> r i10.aig; b; ps; b; rw -l; rw -lz; b; rw -lz; b; ps; cec
-    i10          : i/o =  257/  224  lat =    0  and =   2396  lev = 37
-    i10          : i/o =  257/  224  lat =    0  and =   1851  lev = 35
-    Networks are equivalent.
+```
+src/minr/
+  minr_cmd.cpp        &minr CLI 解析與參數檢查
+  minr_core.cpp       3-valued cut、MaxSAT、iterative MaxSAT、report
+  minr_sat.cpp        SAT-based refinement、safe-realization verify
+  minr.h              Minr_Man_t 與參數/統計欄位
+script/
+  parallel.py         批次平行跑 benchmark×seed×dc，產 detail CSV
+  stat.py             detail CSV → stat/barplot CSV
+  k.py                per-k 掃描匯出 CSV（與 -O 1 不同，會對每個 k 各跑一次）
+  minr_regression.py  迴歸測試（與 baseline 比對）
+doc/
+  spec.md / usage.md / implementation.md / experiment.md
+  archive/            舊草稿（draft_*.md、paper.txt）
+_/                    本機工作目錄（tmp、log、opt 快取；見 .gitignore）
+```
 
-or in the batch mode:
+## Solver backend（和 `-p` 的關係）
 
-    [...] ~/abc> ./abc -c "r i10.aig; b; ps; b; rw -l; rw -lz; b; rw -lz; b; ps; cec"
-    ABC command line: "r i10.aig; b; ps; b; rw -l; rw -lz; b; rw -lz; b; ps; cec".
-    i10          : i/o =  257/  224  lat =    0  and =   2396  lev = 37
-    i10          : i/o =  257/  224  lat =    0  and =   1851  lev = 35
-    Networks are equivalent.
+`&minr` 有兩種 MaxSAT 後端：
+- **預設（不加 `-p`）**：呼叫外部 `EvalMaxSAT_bin`（WCNF 檔 → 子程序 stdout），暫存檔預設寫到 `_/tmp`（可用 `MINR_TMPDIR` 改）
+- **加 `-p`**：用 IPAMIR `.so` 以 in-process 方式呼叫 `EvalMaxSAT2022`（預設 `.so`：`third_party/EvalMaxSAT2022/libipamirEvalMaxSAT2022.so`）
 
-## Compiling as C or C++
+兩種後端求的是**同一個** WCNF；差異只在 solver 執行方式與時間統計（詳見 `usage.md` 的時間欄位說明）。
 
-The current version of ABC can be compiled with C compiler or C++ compiler.
+---
 
- * To compile as C code (default): make sure that `CC=gcc` and `ABC_NAMESPACE` is not defined.
- * To compile as C++ code without namespaces: make sure that `CC=g++` and `ABC_NAMESPACE` is not defined.
- * To compile as C++ code with namespaces: make sure that `CC=g++` and `ABC_NAMESPACE` is set to
-   the name of the requested namespace. For example, add `-DABC_NAMESPACE=xxx` to OPTFLAGS.
+## Upstream ABC
 
-## Building a shared library
-
- * Compile the code as position-independent by adding `ABC_USE_PIC=1`.
- * Build the `libabc.so` target: 
- 
-     make ABC_USE_PIC=1 libabc.so
-
-## Bug reporting:
-
-Please try to reproduce all the reported bugs and unexpected features using the latest 
-version of ABC available from https://github.com/berkeley-abc/abc
-
-If the bug still persists, please provide the following information:    
-
- 1. ABC version (when it was downloaded from GitHub)
- 1. Linux distribution and version (32-bit or 64-bit)
- 1. The exact command-line and error message when trying to run the tool
- 1. The output of the `ldd` command run on the exeutable (e.g. `ldd abc`).
- 1. Versions of relevant tools or packages used.
-
-
-## Troubleshooting:
-
- 1. If compilation does not start because of the cyclic dependency check, 
-try touching all files as follows: `find ./ -type f -exec touch "{}" \;`
- 1. If compilation fails because readline is missing, install 'readline' library or
-compile with `make ABC_USE_NO_READLINE=1`
- 1. If compilation fails because pthreads are missing, install 'pthread' library or
-compile with `make ABC_USE_NO_PTHREADS=1`
-    * See http://sourceware.org/pthreads-win32/ for pthreads on Windows
-    * Precompiled DLLs are available from ftp://sourceware.org/pub/pthreads-win32/dll-latest
- 1. If compilation fails in file "src/base/main/libSupport.c", try the following:
-    * Remove "src/base/main/libSupport.c" from "src/base/main/module.make"
-    * Comment out calls to `Libs_Init()` and `Libs_End()` in "src/base/main/mainInit.c"
- 1. On some systems, readline requires adding '-lcurses' to Makefile.
-
-The following comment was added by Krish Sundaresan:
-
-"I found that the code does compile correctly on Solaris if gcc is used (instead of 
-g++ that I was using for some reason). Also readline which is not available by default 
-on most Sol10 systems, needs to be installed. I downloaded the readline-5.2 package 
-from sunfreeware.com and installed it locally. Also modified CFLAGS to add the local 
-include files for readline and LIBS to add the local libreadline.a. Perhaps you can 
-add these steps in the readme to help folks compiling this on Solaris."
-
-The following tutorial is kindly offered by Ana Petkovska from EPFL:
-https://www.dropbox.com/s/qrl9svlf0ylxy8p/ABC_GettingStarted.pdf
-
-## Final remarks:
-
-Unfortunately, there is no comprehensive regression test. Good luck!                                
-
-This system is maintained by Alan Mishchenko <alanmi@berkeley.edu>. Consider also 
-using ZZ framework developed by Niklas Een: https://bitbucket.org/niklaseen/abc-zz (or https://github.com/berkeley-abc/abc-zz)
+本 repo 基於 ABC；若你要看 ABC 本身的使用方式與背景，建議參考 upstream：`https://github.com/berkeley-abc/abc`。
