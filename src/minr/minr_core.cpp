@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdint.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -250,66 +251,113 @@ static char * Minr_DeriveTargetResetByRandomSim( Gia_Man_t * pGia, char * pRoIni
     return pTarget;
 }
 
-// Run T-cycle binary simulation with fixed initial state and PI pattern.
-// vInitState: nRegs entries {0,1}
-// vPiPerFrame: nFrames * nPI entries (frame t at t*nPI + pi)
-// vPoOut: written with nFrames * nPO entries (frame t at t*nPO + po)
-static void Minr_RunPoSim( Gia_Man_t * pGia, Vec_Int_t * vInitState, Vec_Int_t * vPiPerFrame, int nFrames, Vec_Int_t * vPoOut )
+static inline uint64_t Minr_PruneLaneMask( int nLanes )
+{
+    return ( nLanes >= 64 ) ? ~(uint64_t)0 : (((uint64_t)1 << nLanes) - 1);
+}
+
+// 64-way binary simulation used only by -l/-L pruning.
+// Each bit lane is one random pattern; pLaneMask masks unused lanes in the
+// final partial batch.
+static void Minr_RunPoSimWord64( Gia_Man_t * pGia, uint64_t * pInitState, uint64_t * pPiPerFrame,
+                                 int nFrames, uint64_t LaneMask, uint64_t * pPoOut )
 {
     int nRegs = Gia_ManRegNum( pGia );
     int nPI   = Gia_ManPiNum( pGia );
     int nPO   = Gia_ManPoNum( pGia );
-    Vec_Int_t * vObjVals = Vec_IntStart( Gia_ManObjNum( pGia ) );
-    Vec_Int_t * vCurrentState = Vec_IntAlloc( nRegs );
+    int nObjs = Gia_ManObjNum( pGia );
+    uint64_t * pObjVals = ABC_CALLOC( uint64_t, nObjs );
+    uint64_t * pCurrentState = ABC_ALLOC( uint64_t, nRegs );
     Gia_Obj_t * pObj;
     int iObj, t, i, piIdx, poIdx;
 
-    for ( i = 0; i < nRegs; i++ )
-        Vec_IntPush( vCurrentState, Vec_IntEntry( vInitState, i ) );
+    if ( !pObjVals || !pCurrentState )
+        goto cleanup;
 
-    Vec_IntFill( vPoOut, nFrames * nPO, 0 );
+    for ( i = 0; i < nRegs; i++ )
+        pCurrentState[i] = pInitState[i] & LaneMask;
+    memset( pPoOut, 0, sizeof(uint64_t) * (size_t)nFrames * (size_t)nPO );
 
     for ( t = 0; t < nFrames; t++ )
     {
+        pObjVals[0] = 0;
+
         piIdx = 0;
         Gia_ManForEachPi( pGia, pObj, iObj )
-            Vec_IntWriteEntry( vObjVals, Gia_ObjId( pGia, pObj ), Vec_IntEntry( vPiPerFrame, t * nPI + piIdx++ ) );
+            pObjVals[Gia_ObjId( pGia, pObj )] = pPiPerFrame[t * nPI + piIdx++] & LaneMask;
 
         for ( i = 0; i < nRegs; i++ )
         {
             Gia_Obj_t * pRo = Gia_ManRo( pGia, i );
-            Vec_IntWriteEntry( vObjVals, Gia_ObjId( pGia, pRo ), Vec_IntEntry( vCurrentState, i ) );
+            pObjVals[Gia_ObjId( pGia, pRo )] = pCurrentState[i] & LaneMask;
         }
 
-        Minr_SimulateTimeframe( pGia, vObjVals );
+        Gia_ManForEachObj( pGia, pObj, iObj )
+        {
+            uint64_t Val = 0;
+            if ( Gia_ObjIsCi( pObj ) || iObj == 0 )
+                continue;
+
+            if ( Gia_ObjIsAnd( pObj ) )
+            {
+                uint64_t v0 = pObjVals[Gia_ObjFaninId0( pObj, iObj )];
+                uint64_t v1 = pObjVals[Gia_ObjFaninId1( pObj, iObj )];
+                if ( Gia_ObjFaninC0( pObj ) ) v0 = (~v0) & LaneMask;
+                if ( Gia_ObjFaninC1( pObj ) ) v1 = (~v1) & LaneMask;
+                Val = v0 & v1;
+            }
+            else if ( Gia_ObjIsCo( pObj ) )
+            {
+                Val = pObjVals[Gia_ObjFaninId0( pObj, iObj )];
+                if ( Gia_ObjFaninC0( pObj ) ) Val = (~Val) & LaneMask;
+            }
+            pObjVals[iObj] = Val & LaneMask;
+        }
 
         poIdx = 0;
         Gia_ManForEachPo( pGia, pObj, iObj )
-            Vec_IntWriteEntry( vPoOut, t * nPO + poIdx++, Vec_IntEntry( vObjVals, Gia_ObjId( pGia, pObj ) ) );
+            pPoOut[t * nPO + poIdx++] = pObjVals[Gia_ObjId( pGia, pObj )] & LaneMask;
 
-        Vec_IntClear( vCurrentState );
         for ( i = 0; i < nRegs; i++ )
         {
             Gia_Obj_t * pRi = Gia_ManRi( pGia, i );
-            Vec_IntPush( vCurrentState, Vec_IntEntry( vObjVals, Gia_ObjId( pGia, pRi ) ) );
+            pCurrentState[i] = pObjVals[Gia_ObjId( pGia, pRi )] & LaneMask;
         }
     }
 
-    Vec_IntFree( vObjVals );
-    Vec_IntFree( vCurrentState );
+cleanup:
+    ABC_FREE( pObjVals );
+    ABC_FREE( pCurrentState );
 }
 
-// Compare two PO sequences; return 1 if equal.
-static int Minr_PoSeqEqual( Vec_Int_t * vA, Vec_Int_t * vB, int nLen )
+static int Minr_PoSeqWord64FirstDiff( uint64_t * pA, uint64_t * pB, int nFrames, int nPO,
+                                      uint64_t LaneMask, int * pDiffFrame, int * pDiffPo, int * pDiffLane )
 {
-    int i;
+    int i, lane;
+    int nLen = nFrames * nPO;
     for ( i = 0; i < nLen; i++ )
-        if ( Vec_IntEntry( vA, i ) != Vec_IntEntry( vB, i ) )
-            return 0;
-    return 1;
+    {
+        uint64_t Diff = (pA[i] ^ pB[i]) & LaneMask;
+        if ( Diff == 0 )
+            continue;
+        if ( pDiffFrame ) *pDiffFrame = nPO ? i / nPO : 0;
+        if ( pDiffPo )    *pDiffPo    = nPO ? i % nPO : 0;
+        if ( pDiffLane )
+        {
+            *pDiffLane = 0;
+            for ( lane = 0; lane < 64; lane++ )
+                if ( Diff & ((uint64_t)1 << lane) )
+                {
+                    *pDiffLane = lane;
+                    break;
+                }
+        }
+        return 1;
+    }
+    return 0;
 }
 
-// Prune redundant specified registers from pInitStr via PO golden comparison.
+// Prune redundant specified registers from pInitStr via 64-way PO golden comparison.
 // RNG stream must already be seeded/advanced by caller (-r/-D).
 static void Minr_PruneRedundantResets( Gia_Man_t * pGia, char * pInitStr, int nIters, int nCycles, int vLevel, int * pnNecessary )
 {
@@ -318,12 +366,12 @@ static void Minr_PruneRedundantResets( Gia_Man_t * pGia, char * pInitStr, int nI
     int nPO   = Gia_ManPoNum( pGia );
     int nSpecBefore = 0, nSpecAfter = 0;
     unsigned char * vNecessary = NULL;
-    int * vFreeInit = NULL;
-    Vec_Int_t * vResolvedInit = NULL;
-    Vec_Int_t * vPiPerFrame = NULL;
-    Vec_Int_t * vGoldenPo = NULL;
-    Vec_Int_t * vTrialPo = NULL;
-    int iter, ri, t, piIdx;
+    uint64_t * pFreeInitWords = NULL;
+    uint64_t * pResolvedInit = NULL;
+    uint64_t * pPiPerFrame = NULL;
+    uint64_t * pGoldenPo = NULL;
+    uint64_t * pTrialPo = NULL;
+    int batchStart, lane, nLanes, ri, t, piIdx;
 
     if ( pnNecessary )
         *pnNecessary = 0;
@@ -348,76 +396,85 @@ static void Minr_PruneRedundantResets( Gia_Man_t * pGia, char * pInitStr, int nI
     }
 
     vNecessary    = (unsigned char *)calloc( (size_t)nRegs, 1 );
-    vFreeInit     = ABC_ALLOC( int, nRegs );
-    vResolvedInit = Vec_IntAlloc( nRegs );
-    vPiPerFrame   = Vec_IntAlloc( nCycles * nPI );
-    vGoldenPo     = Vec_IntAlloc( nCycles * nPO );
-    vTrialPo      = Vec_IntAlloc( nCycles * nPO );
-    if ( !vNecessary || !vFreeInit || !vResolvedInit || !vPiPerFrame || !vGoldenPo || !vTrialPo )
+    pFreeInitWords = ABC_ALLOC( uint64_t, nRegs );
+    pResolvedInit = ABC_ALLOC( uint64_t, nRegs );
+    pPiPerFrame   = ABC_ALLOC( uint64_t, (size_t)nCycles * (size_t)nPI );
+    pGoldenPo     = ABC_ALLOC( uint64_t, (size_t)nCycles * (size_t)nPO );
+    pTrialPo      = ABC_ALLOC( uint64_t, (size_t)nCycles * (size_t)nPO );
+    if ( !vNecessary || !pFreeInitWords || !pResolvedInit || !pPiPerFrame || !pGoldenPo || !pTrialPo )
         goto cleanup;
 
-    for ( iter = 0; iter < nIters; iter++ )
+    for ( batchStart = 0; batchStart < nIters; batchStart += 64 )
     {
+        uint64_t LaneMask;
         int nPending = 0;
 
         for ( ri = 0; ri < nRegs; ri++ )
-        {
-            if ( pInitStr[ri] == 'x' )
-                vFreeInit[ri] = Minr_RandomBinary();
             if ( (pInitStr[ri] == '0' || pInitStr[ri] == '1') && !vNecessary[ri] )
                 nPending++;
-        }
 
         if ( nPending == 0 )
         {
             if ( vLevel >= 2 )
-                Abc_Print( 1, "[Prune] iter %d: all specified registers already necessary; skip.\n", iter );
+                Abc_Print( 1, "[Prune] batch starting at iter %d: all specified registers already necessary; skip.\n", batchStart );
             break;
         }
 
-        Vec_IntClear( vPiPerFrame );
-        for ( t = 0; t < nCycles; t++ )
-            for ( piIdx = 0; piIdx < nPI; piIdx++ )
-                Vec_IntPush( vPiPerFrame, Minr_RandomBinary() );
+        nLanes = Abc_MinInt( 64, nIters - batchStart );
+        LaneMask = Minr_PruneLaneMask( nLanes );
+        memset( pFreeInitWords, 0, sizeof(uint64_t) * (size_t)nRegs );
+        memset( pPiPerFrame, 0, sizeof(uint64_t) * (size_t)nCycles * (size_t)nPI );
 
-        Vec_IntClear( vResolvedInit );
+        // Generate lane patterns in scalar iteration order so -l still means N
+        // independent samples; only the simulation engine is parallelized.
+        for ( lane = 0; lane < nLanes; lane++ )
+        {
+            uint64_t LaneBit = (uint64_t)1 << lane;
+            for ( ri = 0; ri < nRegs; ri++ )
+                if ( pInitStr[ri] == 'x' && Minr_RandomBinary() )
+                    pFreeInitWords[ri] |= LaneBit;
+            for ( t = 0; t < nCycles; t++ )
+                for ( piIdx = 0; piIdx < nPI; piIdx++ )
+                    if ( Minr_RandomBinary() )
+                        pPiPerFrame[t * nPI + piIdx] |= LaneBit;
+        }
+
         for ( ri = 0; ri < nRegs; ri++ )
         {
             char c = pInitStr[ri];
-            int Val;
             if ( c == '1' )
-                Val = MINR_VAL_1;
+                pResolvedInit[ri] = LaneMask;
             else if ( c == '0' )
-                Val = MINR_VAL_0;
+                pResolvedInit[ri] = 0;
             else
-                Val = vFreeInit[ri];
-            Vec_IntPush( vResolvedInit, Val );
+                pResolvedInit[ri] = pFreeInitWords[ri] & LaneMask;
         }
 
-        Minr_RunPoSim( pGia, vResolvedInit, vPiPerFrame, nCycles, vGoldenPo );
+        Minr_RunPoSimWord64( pGia, pResolvedInit, pPiPerFrame, nCycles, LaneMask, pGoldenPo );
 
         for ( ri = 0; ri < nRegs; ri++ )
         {
-            int ValOrig, ValFlip;
+            uint64_t Orig;
+            int DiffFrame = -1, DiffPo = -1, DiffLane = -1;
 
             if ( pInitStr[ri] != '0' && pInitStr[ri] != '1' )
                 continue;
             if ( vNecessary[ri] )
                 continue;
 
-            ValOrig = Vec_IntEntry( vResolvedInit, ri );
-            ValFlip = Minr_Not( ValOrig );
-            Vec_IntWriteEntry( vResolvedInit, ri, ValFlip );
+            Orig = pResolvedInit[ri];
+            pResolvedInit[ri] = (~Orig) & LaneMask;
 
-            Minr_RunPoSim( pGia, vResolvedInit, vPiPerFrame, nCycles, vTrialPo );
+            Minr_RunPoSimWord64( pGia, pResolvedInit, pPiPerFrame, nCycles, LaneMask, pTrialPo );
 
-            Vec_IntWriteEntry( vResolvedInit, ri, ValOrig );
+            pResolvedInit[ri] = Orig;
 
-            if ( !Minr_PoSeqEqual( vGoldenPo, vTrialPo, nCycles * nPO ) )
+            if ( Minr_PoSeqWord64FirstDiff( pGoldenPo, pTrialPo, nCycles, nPO, LaneMask, &DiffFrame, &DiffPo, &DiffLane ) )
             {
                 vNecessary[ri] = 1;
                 if ( vLevel >= 2 )
-                    Abc_Print( 1, "[Prune] iter %d: L[%d] necessary (PO mismatch).\n", iter, ri );
+                    Abc_Print( 1, "[Prune] batch %d..%d: L[%d] necessary (first mismatch lane=%d cycle=%d po=%d).\n",
+                               batchStart, batchStart + nLanes - 1, ri, DiffLane, DiffFrame, DiffPo );
             }
         }
 
@@ -427,7 +484,8 @@ static void Minr_PruneRedundantResets( Gia_Man_t * pGia, char * pInitStr, int nI
             for ( ri = 0; ri < nRegs; ri++ )
                 if ( vNecessary[ri] )
                     nSoFar++;
-            Abc_Print( 1, "[Prune] iter %d done: %d necessary so far.\n", iter, nSoFar );
+            Abc_Print( 1, "[Prune] batch %d..%d done: %d necessary so far.\n",
+                       batchStart, batchStart + nLanes - 1, nSoFar );
         }
     }
 
@@ -443,16 +501,16 @@ static void Minr_PruneRedundantResets( Gia_Man_t * pGia, char * pInitStr, int nI
         *pnNecessary = nSpecAfter;
 
     if ( vLevel > 0 )
-        Abc_Print( 1, "[Prune] Redundant-reset pruning: %d -> %d specified registers (%d iterations, %d cycles).\n",
+        Abc_Print( 1, "[Prune] 64-way redundant-reset pruning: %d -> %d specified registers (%d samples, %d cycles).\n",
                    nSpecBefore, nSpecAfter, nIters, nCycles );
 
 cleanup:
-    ABC_FREE( vFreeInit );
+    ABC_FREE( pTrialPo );
+    ABC_FREE( pGoldenPo );
+    ABC_FREE( pPiPerFrame );
+    ABC_FREE( pResolvedInit );
+    ABC_FREE( pFreeInitWords );
     ABC_FREE( vNecessary );
-    if ( vResolvedInit ) Vec_IntFree( vResolvedInit );
-    if ( vPiPerFrame )   Vec_IntFree( vPiPerFrame );
-    if ( vGoldenPo )     Vec_IntFree( vGoldenPo );
-    if ( vTrialPo )      Vec_IntFree( vTrialPo );
 }
 
 ////////////////////////////////////////////////////////////////////////

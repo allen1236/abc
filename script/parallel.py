@@ -99,6 +99,8 @@ BENCHMARKS = [
 
 ALWAYS_CORE_ONLY = [
     "iscas89/s38584.aig",
+    "itc99/b18.aig",
+    "itc99/b19.aig",
 ]
 ALWAYS_CORE_ONLY_STEMS = {
     os.path.splitext(os.path.basename(path))[0] for path in ALWAYS_CORE_ONLY
@@ -118,7 +120,7 @@ RANDOM_SIM_CYCLE = 100
 REFINE_MODE = 1
 REFINE_BIND_DC = True
 REFINE_CONF_LIMIT = 10000
-REFINE_CORE_ONLY = False
+REFINE_CORE_ONLY = True
 OTHER_ARGS = "-l 500 -L 20"
 OPTIMIZE_MODE = 1
 DC_RATIO = [0]
