@@ -19,6 +19,7 @@
 ***********************************************************************/
 
 #include "base/abc/abc.h"
+#include "aig/gia/gia.h"
 #include "base/main/main.h"
 #include "base/main/mainInt.h"
 #include "proof/fraig/fraig.h"
@@ -52105,7 +52106,7 @@ int Abc_CommandAbc9BRecover( Abc_Frame_t * pAbc, int argc, char ** argv )
     Gia_Man_t *pSpec, *pImpl_out = 0, *pSpec_out = 0, *pMiter, *pPatched = 0, *pTemp, *pBmiter;
     char * FileName = NULL;
     FILE * pFile = NULL;
-    int c, fVerbose = 0, success = 1, fEq = 1, fEqOut = 1;
+    int c, fVerbose = 0, success = 1, fEq = 1, fEqOut = 1, fTest = 0;
 
     // params
     Gps_Par_t Pars, * pPars = &Pars;
@@ -52118,13 +52119,16 @@ int Abc_CommandAbc9BRecover( Abc_Frame_t * pAbc, int argc, char ** argv )
 
     // parse options
     Extra_UtilGetoptReset();
-    while ( ( c = Extra_UtilGetopt( argc, argv, "vhCkeo" ) ) != EOF )
+    while ( ( c = Extra_UtilGetopt( argc, argv, "vhxCkeo" ) ) != EOF )
     {
         switch ( c )
         {
         case 'v':
             fVerbose ^= 1;
             pParsFra->fVerbose ^= 1;
+            break;
+        case 'x':
+            fTest ^= 1;
             break;
         case 'C':
             if ( globalUtilOptind >= argc )
@@ -52189,7 +52193,7 @@ int Abc_CommandAbc9BRecover( Abc_Frame_t * pAbc, int argc, char ** argv )
     }    
 
     // start boundary manager
-    pBnd = Bnd_ManStart( pSpec, pAbc->pGia, fVerbose );
+    pBnd = Bnd_ManStart( pSpec, pAbc->pGia, fVerbose, fTest );
 
     // check boundary
     if ( 0 == Bnd_ManCheckBound( pSpec, fVerbose ) )
@@ -52218,24 +52222,27 @@ int Abc_CommandAbc9BRecover( Abc_Frame_t * pAbc, int argc, char ** argv )
 
     if ( success )
     {
+
         // find 
         Bnd_ManFindBound( pSpec, pAbc->pGia );
 
         // create spec_out and impl_out
-        pImpl_out = Bnd_ManGenImplOut( pAbc->pGia );
+        pImpl_out = Bnd_ManGenImplOut( pAbc->pGia, pSpec );
         while ( !pImpl_out )  
         {
             // remove combinational loop
             if (fVerbose)  printf("invalid boundary. try again.\n");
             Bnd_ManRemoveLoop( pAbc->pGia );
             Bnd_ManFindBound( pSpec, pAbc->pGia );
-            pImpl_out = Bnd_ManGenImplOut( pAbc->pGia );
+            pImpl_out = Bnd_ManGenImplOut( pAbc->pGia, pSpec );
         }
         if ( !pImpl_out ) success = 0;
 
         pSpec_out = Bnd_ManGenSpecOut( pSpec );
         if ( !pSpec_out ) success = 0;
 
+        Gia_ManStaticFanoutStop(pSpec);
+        Gia_ManStaticFanoutStop(pAbc->pGia);
 
         // Gia_AigerWrite( pSpec_out, "spec_out.aig", 0, 0, 0 );
         // Gia_AigerWrite( pImpl_out, "impl_out.aig", 0, 0, 0 );
@@ -52329,6 +52336,7 @@ usage:
     Abc_Print( -2, "\t-C num : the max number of conflicts at a node [default = %d]\n", pParsFra->nBTLimit );
     Abc_Print( -2, "\t-e     : toggle checking the equivalence of the result [default = %s]\n", fEq? "yes": "no" );
     Abc_Print( -2, "\t-o     : toggle checking the equivalence of the outsides in verbose [default = %s]\n", fEqOut? "yes": "no" );
+    Abc_Print( -2, "\t-x     : toggle experimental improvement [default = %s]\n", fTest? "yes": "no" );
     Abc_Print( -2, "\t<impl> : the implementation aig. (should be equivalent to spec)\n");    
     Abc_Print( -2, "\t<patch> : the modified spec. (should be a hierarchical AIG)\n");    
     return 1;

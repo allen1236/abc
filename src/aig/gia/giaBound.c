@@ -1,7 +1,11 @@
 #include "gia.h"
 #include "misc/tim/tim.h"
+#include "misc/vec/vecBit.h"
+#include "misc/vec/vecInt.h"
 #include "misc/vec/vecWec.h"
 #include "proof/cec/cec.h"
+#include "misc/vec/vecHsh.h"
+#include "sat/bsat/satVec.h"
 
 
 ABC_NAMESPACE_IMPL_START
@@ -29,6 +33,7 @@ struct Bnd_Man_t_
     int nNode_patched;
 
     int fVerbose;
+    int fTest;
 
     int combLoop_spec;
     int combLoop_impl;
@@ -43,6 +48,10 @@ struct Bnd_Man_t_
     Vec_Ptr_t* vBmiter2Spec;
     Vec_Ptr_t* vBmiter2Impl;
     Vec_Bit_t* vSpec2Impl_phase;    
+
+    Hsh_VecMan_t * pHash;
+    Vec_Int_t * vSpecSuppIds;
+    Vec_Int_t * vImplSuppIds;
 
     // TODO: record all phases
 
@@ -59,6 +68,8 @@ struct Bnd_Man_t_
     Vec_Bit_t* vEO_phase;
 
     Vec_Int_t* vLoop;
+
+
 };
 
 Bnd_Man_t* pBnd = 0;
@@ -88,7 +99,7 @@ int         Bnd_ManImpl2SpecNum( int id ) { return Vec_IntSize( (Vec_Int_t*)Vec_
 
 ***********************************************************************/
 
-Bnd_Man_t* Bnd_ManStart( Gia_Man_t *pSpec, Gia_Man_t *pImpl, int fVerbose )
+Bnd_Man_t* Bnd_ManStart( Gia_Man_t *pSpec, Gia_Man_t *pImpl, int fVerbose, int fTest )
 {
     int i;
     Bnd_Man_t* p = ABC_CALLOC( Bnd_Man_t, 1 );
@@ -113,6 +124,10 @@ Bnd_Man_t* Bnd_ManStart( Gia_Man_t *pSpec, Gia_Man_t *pImpl, int fVerbose )
     Vec_IntFill( p -> vImpl2Bmiter, Gia_ManObjNum(pImpl), p -> maxNumClass - 1 );
     p -> vSpec2Bmiter = Vec_IntAlloc( Gia_ManObjNum(pSpec) );
     Vec_IntFill( p -> vSpec2Bmiter, Gia_ManObjNum(pSpec), p -> maxNumClass - 1);
+
+    p -> pHash = 0;
+    p -> vSpecSuppIds = 0;
+    p -> vImplSuppIds = 0;
     
     p -> vBI = Vec_IntAlloc(16);
     p -> vBO = Vec_IntAlloc(16);
@@ -129,6 +144,7 @@ Bnd_Man_t* Bnd_ManStart( Gia_Man_t *pSpec, Gia_Man_t *pImpl, int fVerbose )
     p -> nNode_patched = 0;
 
     p -> fVerbose = fVerbose;
+    p -> fTest = fTest;
 
     p -> combLoop_spec = 0;
     p -> combLoop_impl = 0;
@@ -164,6 +180,10 @@ void Bnd_ManStop()
     Vec_BitFree( pBnd-> vSpec2Impl_phase );
     Vec_IntFree( pBnd-> vImpl2Bmiter );
     Vec_IntFree( pBnd-> vSpec2Bmiter );
+
+    if ( pBnd-> pHash ) Hsh_VecManStop(pBnd -> pHash);
+    if ( pBnd-> vSpecSuppIds ) Vec_IntFree(pBnd-> vSpecSuppIds);
+    if ( pBnd-> vImplSuppIds ) Vec_IntFree(pBnd-> vImplSuppIds);
 
     Vec_IntFree( pBnd->vBI );
     Vec_IntFree( pBnd->vBO );
@@ -565,6 +585,12 @@ int Bnd_ManCheckExtBound( Gia_Man_t * p, Vec_Int_t *vEI, Vec_Int_t *vEO )
 }
 
 
+void Bnd_ManMarkImpl( Gia_Man_t * pSpec, Gia_Man_t * pImpl )
+{
+    // problem: might need to consider fanout cone
+    // problem: might need to remove duplicated ids
+}
+
 /**Function*************************************************************
 
   Synopsis    []
@@ -585,7 +611,6 @@ void Bnd_ManFindBound( Gia_Man_t * p, Gia_Man_t * pImpl )
     int i, j, id, cnt;
 
     Bnd_ManResetBound();
-
 
     // read
     Vec_Bit_t *vSpec2Impl_phase = pBnd -> vSpec2Impl_phase;
@@ -801,7 +826,456 @@ void Bnd_ManFindBound( Gia_Man_t * p, Gia_Man_t * pImpl )
     Vec_IntFree(vAO);
 
 }
+void Bnd_ManGetTFIClasses( Gia_Man_t * p, Vec_Int_t * vSuppIds, Hsh_VecMan_t * pHash ) {    
 
+    Gia_Obj_t * pObj; int i;
+    Vec_Int_t * vSupp = Vec_IntAlloc( 100 );
+    // initialize input supports with empty sets
+    Gia_ManForEachCi( p, pObj, i )
+        Vec_IntWriteEntry( vSuppIds, Gia_ObjId(p, pObj), 0 );
+
+    Gia_ManForEachAnd( p, pObj, i )
+    {
+        Vec_Int_t * vSupp0 = Hsh_VecReadEntry(pHash, Vec_IntEntry(vSuppIds, Gia_ObjFaninId0(pObj, i)));
+        Vec_Int_t * vSupp1 = Hsh_VecReadEntry1(pHash, Vec_IntEntry(vSuppIds, Gia_ObjFaninId1(pObj, i)));
+
+        Vec_IntTwoMerge2( vSupp0, vSupp1, vSupp );
+        // add unit nodes for the fanins if they are coupled
+        if ( Gia_ObjFanin0(pObj)->Value != -1 )
+            Vec_IntPushOrder( vSupp, Gia_ObjFanin0(pObj)->Value );
+        if ( Gia_ObjFanin1(pObj)->Value != -1 )
+            Vec_IntPushOrder( vSupp, Gia_ObjFanin1(pObj)->Value );
+        int iSupp = Hsh_VecManAdd( pHash, vSupp );
+        Vec_IntWriteEntry( vSuppIds, i, iSupp );
+    }
+    Vec_IntFree( vSupp );
+}
+void Bnd_ManGetTFOClasses( Gia_Man_t * p, Vec_Int_t * vSuppIds, Hsh_VecMan_t * pHash ) {    
+
+    Gia_ManStaticFanoutStart(p);
+
+    Gia_Obj_t * pObj; int i, j, FanId;
+    Vec_Int_t * vSupp0 = Vec_IntAlloc( 100 );
+    Vec_Int_t * vSupp = Vec_IntAlloc( 100 );
+    // initialize input supports with empty sets
+    Gia_ManForEachCo( p, pObj, i )
+        Vec_IntWriteEntry( vSuppIds, Gia_ObjId(p, pObj), 0 );
+
+    Vec_Int_t * vSupp1;
+
+    Gia_ManForEachAndReverse( p, pObj, i )
+    {
+        Vec_IntClear(vSupp0);
+        Gia_ObjForEachFanoutStaticId(p, i, FanId, j)
+        {
+            if ( j == 0 )
+            {
+                vSupp1 = Hsh_VecReadEntry1(pHash, Vec_IntEntry(vSuppIds, FanId));
+                Vec_IntAppend(vSupp0, vSupp1);
+            }
+            else
+            {
+                vSupp1 = Hsh_VecReadEntry1(pHash, Vec_IntEntry(vSuppIds, FanId));
+                Vec_IntTwoMerge2( vSupp0, vSupp1, vSupp );
+                Vec_IntClear(vSupp0);
+                Vec_IntAppend(vSupp0, vSupp);
+            }
+        }
+
+        // add it self as a unit support
+        if ( pObj->Value != -1 )
+            Vec_IntPushOrder( vSupp, pObj->Value );
+        int iSupp = Hsh_VecManAdd( pHash, vSupp );
+        Vec_IntWriteEntry( vSuppIds, i, iSupp );
+    }
+    Vec_IntFree( vSupp0 );
+    Vec_IntFree( vSupp );
+
+    Gia_ManStaticFanoutStop(p);
+}
+
+// comput the eq classes in TFI
+void Bnd_ManCollectFaninClasses( Gia_Man_t * pSpec, Gia_Man_t * pImpl )
+{
+    Gia_Obj_t * pObj;
+    int i;
+    Hsh_VecMan_t * pHash = Hsh_VecManStart( 1000 );
+    Vec_Int_t * vSupp = Vec_IntAlloc( 100 );
+    int iSet = Hsh_VecManAdd( pHash, vSupp ); // add empty set
+    assert( iSet == 0 );    
+    Vec_Int_t * vSpecSuppIds = Vec_IntStart(Gia_ManObjNum(pSpec));
+    Vec_Int_t * vImplSuppIds = Vec_IntStart(Gia_ManObjNum(pImpl));
+
+    // set spec value to impl repr
+    Gia_ManForEachObj(pSpec, pObj, i)
+    {
+        if ( Bnd_ManSpec2ImplNum(i) > 0 )
+            pObj->Value = Vec_IntEntry(Bnd_ManSpec2Impl(i), 0);
+        else 
+            pObj->Value = -1;
+    }
+    Bnd_ManGetTFIClasses(pSpec, vSpecSuppIds, pHash );
+
+    // set impl value to repr
+    Gia_ManForEachObj(pImpl, pObj, i)
+    {
+        if ( Bnd_ManImpl2SpecNum(i) > 0 )
+            pObj->Value = Vec_IntEntry(Bnd_ManSpec2Impl( Vec_IntEntry( Bnd_ManImpl2Spec(i), 0 ) ), 0); 
+        else 
+            pObj->Value = -1;
+    }
+    Bnd_ManGetTFIClasses(pImpl, vImplSuppIds, pHash );
+
+    Vec_IntFree(vSupp);
+    // Hsh_VecManStop(pHash);
+    // Vec_IntFree(vSpecSuppIds);
+    // Vec_IntFree(vImplSuppIds);
+    pBnd -> pHash = pHash;
+    pBnd -> vSpecSuppIds = vSpecSuppIds;
+    pBnd -> vImplSuppIds = vImplSuppIds;
+}
+
+// comput the eq classes in TFO
+void Bnd_ManComputeSignature( Gia_Man_t * pSpec, Gia_Man_t * pImpl )
+{
+    Gia_Obj_t * pObj;
+    int i;
+    Hsh_VecMan_t * pHash = Hsh_VecManStart( 1000 );
+    Vec_Int_t * vSupp = Vec_IntAlloc( 100 );
+    int iSet = Hsh_VecManAdd( pHash, vSupp ); // add empty set
+    assert( iSet == 0 );    
+    Vec_Int_t * vSpecSuppIds = Vec_IntStart(Gia_ManObjNum(pSpec));
+    Vec_Int_t * vImplSuppIds = Vec_IntStart(Gia_ManObjNum(pImpl));
+
+    // set spec value to impl repr
+    Gia_ManForEachObj(pSpec, pObj, i)
+    {
+        if ( Bnd_ManSpec2ImplNum(i) > 0 )
+            pObj->Value = Vec_IntEntry(Bnd_ManSpec2Impl(i), 0);
+        else 
+            pObj->Value = -1;
+    }
+    Bnd_ManGetTFOClasses(pSpec, vSpecSuppIds, pHash );
+
+    // set impl value to repr
+    Gia_ManForEachObj(pImpl, pObj, i)
+    {
+        if ( Bnd_ManImpl2SpecNum(i) > 0 )
+            pObj->Value = Vec_IntEntry(Bnd_ManSpec2Impl( Vec_IntEntry( Bnd_ManImpl2Spec(i), 0 ) ), 0); 
+        else 
+            pObj->Value = -1;
+    }
+    Bnd_ManGetTFOClasses(pImpl, vImplSuppIds, pHash );
+
+    Vec_IntFree(vSupp);
+    // Hsh_VecManStop(pHash);
+    // Vec_IntFree(vSpecSuppIds);
+    // Vec_IntFree(vImplSuppIds);
+    pBnd -> pHash = pHash;
+    pBnd -> vSpecSuppIds = vSpecSuppIds;
+    pBnd -> vImplSuppIds = vImplSuppIds;
+}
+
+static inline int Vec_IntNotContained( Vec_Int_t * pSmall, Vec_Int_t * pLarge ) 
+{
+    int i, k;
+    int count = pSmall->nSize;
+    for ( i = 0; i < pSmall->nSize; i++ )
+    {
+        for ( k = 0; k < pLarge->nSize; k++ )
+            if ( pSmall->pArray[i] == pLarge->pArray[k] )
+            {
+                count--;
+                break;
+            }
+    }
+    return count;
+}
+
+Vec_Int_t* Bnd_ManMarkAffectedNodes( Gia_Man_t * pSpec, Gia_Man_t * pImpl )
+{
+    Gia_ManStaticFanoutStart(pSpec);
+    Gia_ManStaticFanoutStart(pImpl);
+
+    int i, j, k;
+    int id_spec, id_impl;
+    Gia_Obj_t * pObj_spec;
+    Gia_Obj_t * pObj_impl;
+    Gia_Obj_t * pFanout;
+
+    Gia_ManFillValue(pSpec);
+    Gia_ManFillValue(pImpl);
+
+    Vec_Wec_t * vFanouts_spec = Vec_WecStart(Gia_ManObjNum(pImpl));
+    Vec_Wec_t * vFanouts_impl = Vec_WecStart(Gia_ManObjNum(pImpl));
+
+    Vec_Int_t * vAffected = Vec_IntAlloc(8);
+
+    int id_repr;
+
+    Vec_IntForEachEntry(pBnd->vEO_spec, id_spec, i)
+    {
+        pObj_spec = Gia_ManObj(pSpec, id_spec);
+        id_repr = Vec_IntEntry(Bnd_ManSpec2Impl(id_spec), 0);
+        Gia_ObjForEachFanoutStatic(pSpec, pObj_spec, pFanout, j)
+        {
+            pFanout -> Value = 1;
+            Vec_WecPush(vFanouts_spec, id_repr, Gia_ObjId(pSpec, pFanout));
+        }
+        Vec_IntForEachEntry( Bnd_ManSpec2Impl(id_spec), id_impl, j)
+        {
+            pObj_impl = Gia_ManObj(pImpl, id_impl);
+            Gia_ObjForEachFanoutStatic(pImpl, pObj_impl, pFanout, k)
+            {
+                Vec_WecPush(vFanouts_impl, id_repr, Gia_ObjId(pImpl, pFanout));
+            }
+        }
+    }
+
+    Vec_Int_t *vLevel_spec;
+    Vec_Int_t *vLevel_impl;
+    int hsh_id;
+    int hsh_id_impl;
+    Vec_Int_t * vSupp;
+    Vec_Int_t * vSupp_impl;
+    Vec_WecForEachLevel(vFanouts_spec, vLevel_spec, i)
+    {
+        if ( Vec_IntSize(vLevel_spec) == 0 )
+            continue;
+        vLevel_impl = Vec_WecEntry( vFanouts_impl, i );
+        printf("level size: %4d %4d\n", Vec_IntSize(vLevel_spec), Vec_IntSize(vLevel_impl));
+        if ( Vec_IntSize(vLevel_spec) == Vec_IntSize(vLevel_impl) )
+        {
+            // mark every fanout in impl as "should be reconnected"
+            Vec_IntForEachEntry(vLevel_impl, id_impl, j)
+            {
+                Vec_IntPush(vAffected, id_impl);
+            }
+        }
+        else 
+        {
+            // find the fanouts in impl that should be reconnected
+            // that is, the fanouts that is mapped to the fanouts in spec
+            Vec_IntForEachEntry(vLevel_spec, id_spec, j)
+            {
+                hsh_id =  Vec_IntEntry( pBnd->vSpecSuppIds, id_spec);
+                vSupp = Hsh_VecReadEntry(pBnd->pHash, hsh_id);
+                // printf(" %d", Vec_IntEntry( pBnd->vSpecSuppIds, id_spec) );
+                // printf(" %d", Vec_IntSize( vSupp ) );
+                // Vec_IntPrint( vSupp );
+                int fanout_idx = -1;
+                int fanout_not = -1;
+                int fanout_size = -1;
+                int not;
+
+                Vec_IntForEachEntry(vLevel_impl, id_impl, k)
+                {
+                    if ( Gia_ManObj(pImpl, id_impl) -> Value == i ) continue;
+                    hsh_id_impl =  Vec_IntEntry( pBnd->vImplSuppIds, id_impl);
+                    vSupp_impl = Hsh_VecReadEntry1(pBnd->pHash, hsh_id_impl);
+                    not = Vec_IntNotContained( vSupp, vSupp_impl );
+                    if ( fanout_idx == -1 || not <= fanout_not ) // can be faster as signature are sorted
+                    {
+                        // printf("contained, supp size %d\n", Vec_IntSize(vSupp_impl));
+                        if ( fanout_idx == -1 || not < fanout_not || Vec_IntSize(vSupp_impl) < fanout_size )
+                        {
+                            fanout_not = not;
+                            fanout_idx = id_impl;
+                            fanout_size = Vec_IntSize(vSupp_impl);
+                        }
+                    }
+                }
+
+                if ( fanout_idx  == -1 )
+                {
+                    printf("not found\n");
+
+                }
+                else 
+                {
+                    printf("found fanout node %d with not = %d\n", fanout_idx, fanout_not);
+                    Vec_IntPush(vAffected, fanout_idx);
+                    Gia_ManObj(pImpl, fanout_idx) -> Value = i;
+                }
+            }
+
+            printf("signature\n\n");
+            printf("  spec:\n");
+            Vec_IntForEachEntry(vLevel_spec, id_spec, j)
+            {
+                hsh_id =  Vec_IntEntry( pBnd->vSpecSuppIds, id_spec);
+                vSupp = Hsh_VecReadEntry(pBnd->pHash, hsh_id);
+                // printf(" %d", Vec_IntEntry( pBnd->vSpecSuppIds, id_spec) );
+                // printf(" %d", Vec_IntSize( vSupp ) );
+                printf("  %5d: ", id_spec);
+                Vec_IntPrint( vSupp );
+            }
+
+            printf("\n  impl:\n");
+            Vec_IntForEachEntry(vLevel_impl, id_impl, j)
+            {
+                hsh_id =  Vec_IntEntry( pBnd->vImplSuppIds, id_impl);
+                vSupp = Hsh_VecReadEntry(pBnd->pHash, hsh_id);
+                // printf(" %d", Vec_IntEntry( pBnd->vImplSuppIds, id_impl) );
+                // printf(" %d", Vec_IntSize( vSupp ) );
+                printf("  %5d: ", id_impl);
+                Vec_IntPrint( vSupp ); 
+            }
+            printf("\n");
+        }
+    }
+
+    Vec_WecFree(vFanouts_spec);
+    Vec_WecFree(vFanouts_impl);
+
+    Gia_ManStaticFanoutStop(pSpec);
+    Gia_ManStaticFanoutStop(pImpl);
+
+    return vAffected;
+    
+}
+
+/**Function*************************************************************
+
+  Synopsis    []
+
+  Description [create circuit with the boundary changed to CI/CO]
+
+  SideEffects []
+
+  SeeAlso     []
+
+***********************************************************************/
+Gia_Man_t* Bnd_ManCutBoundary2( Gia_Man_t *p, Gia_Man_t *pSpec, Vec_Int_t* vEI, Vec_Int_t* vEO, Vec_Bit_t* vEI_phase, Vec_Bit_t* vEO_phase )
+{
+    Gia_Man_t * pNew, * pTemp;
+    Gia_Obj_t * pObj;
+    int i, id, lit, lit0, lit1;
+
+    // check if the boundary has loop (EO cannot be in the TFI of EI )
+
+    if ( !Bnd_ManCheckExtBound( p, vEI, vEO ) )
+    {
+        printf("Combinational loop exist\n");
+        return 0;
+    }
+
+    // compute signature
+    Bnd_ManComputeSignature(pSpec, p);
+    Vec_Int_t * vAffected = Bnd_ManMarkAffectedNodes(pSpec, p);
+
+    // initialize
+    pNew = Gia_ManStart( Gia_ManObjNum(p) );
+    pNew -> pName = ABC_ALLOC( char, strlen(p->pName)+10);
+    sprintf( pNew -> pName, "%s_out", p -> pName );
+    Gia_ManHashStart( pNew );
+    Gia_ManFillValue(p);
+    Gia_ManConst0(p) -> Value = 0;
+    Gia_ManStaticFanoutStart(p);
+
+    // mark affected nodes
+    Vec_IntForEachEntry(vAffected, id, i)
+    {
+        Gia_ManObj(p, id) -> Value = ~1;
+    }
+
+    // record the original value for eo
+    Vec_Int_t * vRewireValue = Vec_IntAlloc( Gia_ManObjNum(p) );
+    Vec_IntFill( vRewireValue, Gia_ManObjNum(p), ~0 );
+
+    // create ci for ci
+    Gia_ManForEachCi( p, pObj, i )
+    {
+        pObj -> Value = Gia_ManAppendCi( pNew );
+    }
+
+    // create ci for eo
+    Vec_IntForEachEntry( vEO, id, i )
+    {
+        pObj = Gia_ManObj(p, id);
+
+        lit = Gia_ManAppendCi(pNew);
+        if ( vEO_phase && Vec_BitEntry(vEO_phase, i) )
+        {
+            lit ^= 1;
+        }
+        Vec_IntSetEntry(vRewireValue, id, lit);
+
+        // TODO use all impl nodes ids
+
+        /*
+        if( pObj -> Value != ~0 )
+        {
+            // EO at PI?
+            Vec_IntSetEntry( vValue, id, Gia_ManObj(p, id) -> Value );
+        }
+        pObj -> Value = Gia_ManAppendCi(pNew);
+        if ( vEO_phase && Vec_BitEntry( vEO_phase, i ) )
+        {
+            pObj -> Value ^= 1;
+        }
+        */
+    }
+
+    // add aig nodes
+    Gia_ManForEachAnd(p, pObj, i)
+    {
+        if ( pObj -> Value == ~1 )
+        {
+            lit0 = Gia_ObjFanin0Copy(pObj);
+            if ( Vec_IntEntry(vRewireValue, Gia_ObjFaninId0(pObj, i) ) != ~0 )
+            {
+                lit0 = Vec_IntEntry(vRewireValue, Gia_ObjFaninId0(pObj, i)) ^ (Gia_ObjFaninC0(pObj) ? 1 : 0);
+            }
+            lit1 = Gia_ObjFanin1Copy(pObj);
+            if ( Vec_IntEntry(vRewireValue, Gia_ObjFaninId1(pObj, i) ) != ~0 )
+            {
+                lit1 = Vec_IntEntry(vRewireValue, Gia_ObjFaninId1(pObj, i)) ^ (Gia_ObjFaninC1(pObj) ? 1 : 0);
+            }
+
+            pObj -> Value = Gia_ManHashAnd( pNew, lit0, lit1 );
+        }
+        else if (pObj -> Value == ~0 )
+        {
+            pObj -> Value = Gia_ManHashAnd( pNew, Gia_ObjFanin0Copy(pObj), Gia_ObjFanin1Copy(pObj) );
+        }
+    }
+
+    // create co for co and ei
+    Gia_ManForEachCo(p, pObj, i)
+    {
+        printf("add CO output lit %d\n", Gia_ObjFanin0Copy(pObj));
+        Gia_ManAppendCo( pNew, Gia_ObjFanin0Copy(pObj) );
+    }
+    Vec_IntForEachEntry( vEI, id, i )
+    {
+        pObj = Gia_ManObj(p, id);
+        // lit = Gia_ManObj(p, id)->Value;
+        if ( Gia_ObjIsAnd(pObj) )
+        {
+            lit = Gia_ManHashAnd( pNew, Gia_ObjFanin0Copy(pObj), Gia_ObjFanin1Copy(pObj) );
+        }
+        else 
+        {
+            assert(Gia_ObjIsCi(pObj) || Gia_ObjIsConst0(pObj));
+            lit = pObj -> Value;    // EI at PI
+        }
+        if ( vEI_phase && Vec_BitEntry( vEI_phase, i ) ) lit ^= 1;
+        printf("add EI output lit %d\n", lit);
+        Gia_ManAppendCo( pNew, lit );
+    }
+
+    // clean up
+    Gia_ManHashStop( pNew );
+    pNew = Gia_ManCleanup( pTemp = pNew );
+    printf( "new gia has %d nodes.\n", Gia_ManObjNum(pNew) );
+    Gia_ManStop( pTemp );
+    Gia_ManStaticFanoutStop(p);
+    Vec_IntFree(vAffected);
+
+    return pNew;
+
+}
 
 /**Function*************************************************************
 
@@ -847,6 +1321,8 @@ Gia_Man_t* Bnd_ManCutBoundary( Gia_Man_t *p, Vec_Int_t* vEI, Vec_Int_t* vEO, Vec
     {
         pObj -> Value = Gia_ManAppendCi( pNew );
     }
+
+    // create ci for eo
     Vec_IntForEachEntry( vEO, id, i )
     {
         if( Gia_ManObj(p, id) -> Value != ~0 )
@@ -870,6 +1346,7 @@ Gia_Man_t* Bnd_ManCutBoundary( Gia_Man_t *p, Vec_Int_t* vEI, Vec_Int_t* vEO, Vec
     // create co for co and ei
     Gia_ManForEachCo(p, pObj, i)
     {
+        printf("add CO output lit %d\n", Gia_ObjFanin0Copy(pObj));
         Gia_ManAppendCo( pNew, Gia_ObjFanin0Copy(pObj) );
     }
     Vec_IntForEachEntry( vEI, id, i )
@@ -889,6 +1366,7 @@ Gia_Man_t* Bnd_ManCutBoundary( Gia_Man_t *p, Vec_Int_t* vEI, Vec_Int_t* vEO, Vec
             }
         }
         if ( vEI_phase && Vec_BitEntry( vEI_phase, i ) ) lit ^= 1;
+        printf("add EI output lit %d\n", lit);
         Gia_ManAppendCo( pNew, lit );
     }
 
@@ -896,6 +1374,7 @@ Gia_Man_t* Bnd_ManCutBoundary( Gia_Man_t *p, Vec_Int_t* vEI, Vec_Int_t* vEO, Vec
     Vec_IntFree( vValue );
     Gia_ManHashStop( pNew );
     pNew = Gia_ManCleanup( pTemp = pNew );
+    printf( "new gia has %d nodes.\n", Gia_ManObjNum(pNew) );
     Gia_ManStop( pTemp );
     return pNew;
 
@@ -908,10 +1387,18 @@ Gia_Man_t* Bnd_ManGenSpecOut( Gia_Man_t* p  )
     if (!pNew) pBnd -> combLoop_spec = 1;
     return pNew;
 }
-Gia_Man_t* Bnd_ManGenImplOut( Gia_Man_t* p)
+Gia_Man_t* Bnd_ManGenImplOut( Gia_Man_t* p, Gia_Man_t * pSpec )
 {
     if ( pBnd -> fVerbose ) printf("Generating impl_out with given boundary.\n");
-    Gia_Man_t *pNew = Bnd_ManCutBoundary( p, pBnd->vEI_impl, pBnd->vEO_impl, pBnd->vEI_phase, pBnd->vEO_phase );
+    Gia_Man_t *pNew;
+    if ( pBnd -> fTest )
+    {
+        pNew = Bnd_ManCutBoundary2( p, pSpec, pBnd->vEI_impl, pBnd->vEO_impl, pBnd->vEI_phase, pBnd->vEO_phase );
+    }
+    else 
+    {
+        pNew = Bnd_ManCutBoundary( p, pBnd->vEI_impl, pBnd->vEO_impl, pBnd->vEI_phase, pBnd->vEO_phase );
+    }
     if (!pNew) pBnd -> combLoop_impl = 1;
     return pNew;
 }
